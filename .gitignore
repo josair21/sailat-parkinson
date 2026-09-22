@@ -1,0 +1,10 @@
+# Converted research data; keep generated packages outside Git.
+generated_data/
+conversion_output/
+/data/
+/runs/
+*.h5
+*.npz
+*.pth
+*.pkl
+*.f32.gz
