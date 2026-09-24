@@ -42,9 +42,9 @@ Primary flow:
 
 - The intended source is `C:\Users\Josue\Documents\liveserver\runs\6ch_pretrain_weak`, with the source HDF5 and A1 metadata under `liveserver\data`.
 - The source HDF5 is about 88.6 MB and contains six-channel numeric `X` arrays for 1,608 rows. The run family has five selected 5-fold seed runs and `loso_seed42`; model weights/scalers are not needed in the dashboard package.
-- A first offline converter now exists at `scripts/convert_loso_run.py`. It is designed to package global LOSO predictions/signals and each seed's OOF arrays and final-test aggregate metrics. It has not yet been run, and generated research data has not been created or uploaded.
+- Offline conversion is split into `scripts/convert_source_dataset.py` and `scripts/convert_loso_run.py`. The shared dataset was converted once locally; the example run package references it by content-derived ID. Both outputs are under ignored `local-data/` and have not been uploaded.
 - The source has two material gaps: OOF arrays lack patient/action/event IDs, and final-test artifacts contain aggregate metrics rather than all event predictions. The converter preserves those limits instead of joining or fabricating events.
-- GW4 source signals are 100 Hz; the model input is resampled to 64 Hz. Armband 50 Hz signals are not present in the selected six-channel HDF5 `X` schema. The converter preserves source HDF5 signals and records the rates separately.
+- GW4 source signals are 100 Hz; the private browser package serves filtered 20 Hz previews. Precomputed Welch spectra (0–20 Hz) and per-channel band powers (3–7, 7–10, 10–12, and 3–12 Hz) come from the original source before resampling. All 1,608 HDF5 rows retain their action strings and raw A1/A2 labels, including transition actions. The model input is separately resampled to 64 Hz. Armband 50 Hz signals are not present in the selected six-channel HDF5 `X` schema.
 - Signal matching can be ambiguous or unmatched for some global LOSO events. Converter output reports these cases explicitly; review them before interpreting signal/event links.
 - Institutional/cloud storage authorization, Cloudflare account limits, Access protection for both the site and data, and retention/backups remain to be confirmed before upload.
 - Raw data, predictions, annotations, credentials, and private exports must not enter the Git repository.
@@ -52,4 +52,9 @@ Primary flow:
 
 ## Current implementation status
 
-Planning and conversion tooling only. No website, generated data package, Cloudflare resources, or deployment has been created in this folder. See `CONVERSION.md` for the input/output schema, command, and known source-artifact limits.
+- Static browser UI exists in `index.html`, `styles.css`, and `app.js` for Global LOSO patient/event inspection, seed-level OOF distributions, and aggregate final-test metrics.
+- Local shared dataset package contains 1,608 GW4 signal records and 88 patient metadata records. The example LOSO package contains 78 patients and 675 events (344 unique signal links, 206 ambiguous, 125 unmatched).
+- The static server binds to `127.0.0.1:8765`; local data and catalog are ignored by Git. The shared dataset uses schema v3. The current run package uses schema v3 and includes offline run-wide performance summaries by predicted action and filename-derived side; it has not been uploaded.
+- Current stratified summaries cover 675 stored LOSO event predictions across kinetic, postural, rest-end, and rest-start actions. The source dataset also preserves other actions, including transition and task actions, but this LOSO run has no event predictions for those actions. Filename suffix `.00`/`.01` is used for non-dominant/dominant grouping only when candidate filenames consistently agree. Side grouping excludes 275 events with no candidates or uncertain candidate-side codes.
+- No Cloudflare resources, uploads, authentication configuration, or public deployment have been created.
+- OOF and final-test source-artifact limitations remain as documented above.

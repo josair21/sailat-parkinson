@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f5f7fa">
+    <meta name="description" content="Local browser dashboard for Parkinsonian tremor model error analysis.">
+    <title>Parkinson Results Analysis</title>
+    <link rel="icon" href="assets/icons/parkinson-viewer.ico" sizes="any">
+    <link rel="icon" type="image/png" sizes="16x16" href="assets/icons/parkinson-viewer-16.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="assets/icons/parkinson-viewer-32.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="assets/icons/parkinson-viewer-180.png">
+    <link rel="manifest" href="site.webmanifest">
+    <script>try{const t=localStorage.getItem("parkinson-theme");document.documentElement.dataset.theme=t==="dark"||((t!=="light")&&matchMedia("(prefers-color-scheme: dark)").matches)?"dark":"light";}catch{document.documentElement.dataset.theme=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"}</script>
+    <link rel="stylesheet" href="styles.css">
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <div class="app-frame">
+      <header class="topbar">
+        <a class="brand" href="#" aria-label="Parkinson Results Analysis home">
+          <img class="brand-icon" src="assets/icons/parkinson-viewer-32.png" alt="" aria-hidden="true">
+          <span class="brand-copy"><span class="brand-kicker">Research Continuity Tool</span><span class="brand-title">Parkinson Results Analysis</span></span>
+        </a>
+        <div class="team-attribution" aria-label="Sustainable AI Latin American Team">
+          <a class="team-logo-link" href="https://sai.lat" aria-label="Visit the Sustainable AI Latin American Team main page">
+            <img src="assets/icons/sai-team-64.png" alt="" aria-hidden="true">
+          </a>
+          <span class="team-name">Sustainable AI<br>Latin American Team</span>
+        </div>
+        <div class="topbar-right">
+          <span class="local-indicator"><span></span> LOCAL WORKSPACE</span>
+          <label class="theme-control"><span>Theme</span><select id="theme-select" aria-label="Color theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
+          <button class="icon-button" id="about-button" type="button" aria-label="About this dashboard">i</button>
+        </div>
+      </header>
+
+      <div class="layout">
+        <aside class="sidebar">
+          <div class="sidebar-section">
+            <div class="side-label">WORKSPACE</div>
+            <label class="field-label" for="run-select">Experiment</label>
+            <select id="run-select" disabled><option>Loading local catalog…</option></select>
+          </div>
+
+          <div class="sidebar-section">
+            <div class="side-label">ANALYSIS</div>
+            <div class="nav-stack" role="tablist" aria-label="Analysis view">
+              <button class="nav-item active" type="button" data-view="global" role="tab" aria-selected="true">
+                <span class="nav-icon">◫</span><span>Global LOSO</span><span class="nav-count" id="global-count">—</span>
+              </button>
+              <button class="nav-item" type="button" data-view="seeds" role="tab" aria-selected="false">
+                <span class="nav-icon">⌘</span><span>Seed results</span><span class="nav-count" id="seed-count">—</span>
+              </button>
+            </div>
+          </div>
+
+          <div id="global-controls" class="sidebar-section context-controls">
+            <div class="side-label">PATIENT INSPECTION</div>
+            <label class="field-label" for="patient-select">Held-out patient</label>
+            <select id="patient-select" disabled><option>Choose a patient</option></select>
+            <label class="field-label spaced" for="action-filter">Action</label>
+            <select id="action-filter">
+              <option value="all">All actions</option>
+              <option value="rest-start">Rest start</option>
+              <option value="postural">Postural</option>
+              <option value="kinetic">Kinetic</option>
+              <option value="rest-end">Rest end</option>
+            </select>
+            <label class="field-label spaced" for="event-filter">Labels</label>
+            <select id="event-filter">
+              <option value="all">All events</option>
+              <option value="consensus">Consensus only</option>
+              <option value="disagreement">Disagreements</option>
+              <option value="errors">Consensus errors</option>
+            </select>
+          </div>
+
+          <div id="seed-controls" class="sidebar-section context-controls hidden">
+            <div class="side-label">SEED ANALYSIS</div>
+            <label class="field-label" for="seed-select">Training seed</label>
+            <select id="seed-select" disabled><option>Choose a seed</option></select>
+            <div class="segmented" role="tablist" aria-label="Seed split">
+              <button class="segment active" type="button" data-split="oof" role="tab" aria-selected="true">OOF</button>
+              <button class="segment" type="button" data-split="test" role="tab" aria-selected="false">Final test</button>
+            </div>
+          </div>
+
+          <div class="sidebar-bottom">
+            <div class="dataset-status"><span class="status-dot"></span><div><b>Shared dataset</b><small id="dataset-status">Loading manifest…</small></div></div>
+            <p>Source signals load only when an event is selected.</p>
+          </div>
+        </aside>
+
+        <main class="main-content">
+          <section id="loading-state" class="state-card">
+            <div class="loader"></div>
+            <h1>Opening local workspace</h1>
+            <p>Reading the run catalog and summary files.</p>
+          </section>
+
+          <section id="error-state" class="state-card hidden" role="alert">
+            <div class="error-icon">!</div>
+            <h1>Could not load the workspace</h1>
+            <p id="error-message">The local data catalog is unavailable.</p>
+            <button class="button secondary" id="retry-button" type="button">Try again</button>
+          </section>
+
+          <div id="dashboard" class="hidden">
+            <div class="page-heading">
+              <div>
+                <div class="eyebrow">PARKINSONIAN TREMOR <span>/</span> ERROR ANALYSIS</div>
+                <h1 id="page-title">Global LOSO inspection</h1>
+                <p id="page-subtitle">Inspect held-out patient predictions, then open a source signal.</p>
+              </div>
+              <div class="threshold-chip" id="threshold-chip"><span class="chip-label">FROZEN THRESHOLD</span><b>—</b></div>
+            </div>
+
+            <section id="global-view" class="view-panel">
+              <div class="kpi-grid" id="global-kpis"></div>
+              <section class="card stratified-card">
+                <div class="section-heading stratified-heading">
+                  <div><div class="eyebrow">STRATIFIED RESULTS</div><h2>Results by action and filename side</h2></div>
+                  <span class="stratified-threshold" id="stratified-threshold"></span>
+                </div>
+                <div class="stratified-grid">
+                  <div><h3>Actions</h3><div class="table-scroll"><table><thead><tr><th>ACTION</th><th>EVENTS</th><th>CONSENSUS</th><th>DISAGREEMENT</th><th>OTHER CONSENSUS</th><th>RECALL</th><th>SPECIFICITY</th><th>FNR</th><th>FPR</th><th>BA</th></tr></thead><tbody id="action-results-rows"></tbody></table></div></div>
+                  <div><h3>Filename side</h3><div class="table-scroll"><table><thead><tr><th>SIDE</th><th>EVENTS</th><th>CONSENSUS</th><th>DISAGREEMENT</th><th>OTHER CONSENSUS</th><th>RECALL</th><th>SPECIFICITY</th><th>FNR</th><th>FPR</th><th>BA</th></tr></thead><tbody id="dominance-results-rows"></tbody></table></div></div>
+                </div>
+                <p class="stratified-note" id="dominance-results-note"></p>
+              </section>
+              <section class="patient-card card">
+                <div class="patient-main">
+                  <div class="patient-avatar" id="patient-avatar">—</div>
+                  <div>
+                    <div class="eyebrow">SELECTED PATIENT</div>
+                    <h2 id="patient-title">Select a held-out patient</h2>
+                    <p id="patient-subtitle">Patient metadata will appear here.</p>
+                  </div>
+                </div>
+                <div class="patient-meta" id="patient-meta"></div>
+                <div class="patient-stats" id="patient-stats"></div>
+              </section>
+
+              <section class="card chart-card">
+                <div class="section-heading">
+                  <div><div class="eyebrow">MODEL OUTPUT</div><h2>Event probability</h2></div>
+                  <div class="legend" aria-label="Probability plot legend">
+                    <span><i class="dot dot-correct"></i>Correct</span>
+                    <span><i class="dot dot-error"></i>Error</span>
+                    <span><i class="dot dot-disagreement"></i>Disagreement</span>
+                  </div>
+                </div>
+                <div class="probability-wrap" id="probability-plot"><div class="empty-inline">Select a patient to view event probabilities.</div></div>
+                <div class="chart-footnote">Each point is one stored prediction. The dashed line is the run’s stored threshold.</div>
+              </section>
+
+              <section class="card table-card">
+                <div class="section-heading table-heading">
+                  <div><div class="eyebrow">HELD-OUT EVENTS</div><h2>Prediction ledger <span class="subtle-count" id="event-count">—</span></h2></div>
+                  <div class="search-wrap"><span>⌕</span><input id="event-search" type="search" placeholder="Find action or event" aria-label="Search events"></div>
+                </div>
+                <div class="table-scroll">
+                  <table>
+                    <thead><tr><th>EVENT</th><th>ACTION</th><th>FILENAME SIDE</th><th>A1 / A2</th><th>SOFT TARGET</th><th>PROBABILITY</th><th>MODEL</th><th>STATUS</th></tr></thead>
+                    <tbody id="event-rows"><tr><td colspan="8" class="empty-cell">Select a patient to inspect events.</td></tr></tbody>
+                  </table>
+                </div>
+                <div class="chart-footnote">Filename code .00 = non-dominant; .01 = dominant. Mixed candidates mean the event's candidate filenames disagree; signal identity can still be ambiguous.</div>
+              </section>
+
+              <section class="card signal-card">
+                <div class="section-heading">
+                  <div><div class="eyebrow">SOURCE SIGNAL</div><h2 id="signal-title">Select an event</h2></div>
+                  <div class="signal-tools"><label for="signal-source-select" class="field-label">Source record</label><select id="signal-source-select" disabled><option>Not loaded</option></select></div>
+                </div>
+                <div class="signal-provenance" id="signal-provenance">Signals are loaded on selection. The browser receives a filtered 20 Hz preview; original-rate data stay offline.</div>
+                <div class="signal-grid">
+                  <div class="signal-plot-panel"><div class="plot-title">ACCELEROMETER <span>m/s²</span></div><canvas id="acc-canvas" height="210" aria-label="Accelerometer time series"></canvas><div class="axis-caption">Time (s)</div></div>
+                  <div class="signal-plot-panel"><div class="plot-title">GYROSCOPE <span>deg/s</span></div><canvas id="gyr-canvas" height="210" aria-label="Gyroscope time series"></canvas><div class="axis-caption">Time (s)</div></div>
+                </div>
+                <div id="signal-empty" class="signal-empty">Choose an event to load its signal. Ambiguous links require you to choose a source record.</div>
+                <div class="psd-section">
+                  <div class="psd-heading"><div><div class="eyebrow">FREQUENCY DOMAIN</div><h3>Precomputed Welch spectrum</h3></div><span class="band-note"><i></i>Source sampled at 100 Hz</span></div>
+                  <div class="psd-grid">
+                    <div><div class="plot-title">ACCELEROMETER <span>log10 PSD · (m/s²)²/Hz</span></div><canvas id="acc-psd-canvas" height="180" aria-label="Accelerometer precomputed Welch power spectrum"></canvas><div class="plot-title">INTEGRATED BAND POWER <span>log10 (m/s²)²</span></div><canvas id="acc-band-canvas" height="122" aria-label="Accelerometer integrated band powers as vertical bars"></canvas></div>
+                    <div><div class="plot-title">GYROSCOPE <span>log10 PSD · (deg/s)²/Hz</span></div><canvas id="gyr-psd-canvas" height="180" aria-label="Gyroscope precomputed Welch power spectrum"></canvas><div class="plot-title">INTEGRATED BAND POWER <span>log10 (deg/s)²</span></div><canvas id="gyr-band-canvas" height="122" aria-label="Gyroscope integrated band powers as vertical bars"></canvas></div>
+                  </div>
+                  <div class="axis-caption">Precomputed Welch PSD from 0–20 Hz, plus integrated 3–7, 7–10, 10–12, and 3–12 Hz band powers (10–12 Hz comes from the 100 Hz source, not the 20 Hz preview).</div>
+                </div>
+              </section>
+            </section>
+
+            <section id="seed-view" class="view-panel hidden">
+              <div class="kpi-grid" id="seed-kpis"></div>
+              <section class="card seed-overview">
+                <div class="section-heading"><div><div class="eyebrow">SEED COMPARISON</div><h2>Consensus OOF / final-test metrics</h2></div><span class="badge neutral" id="seed-strategy">—</span></div>
+                <div class="table-scroll">
+                  <table><thead><tr><th>SEED</th><th>SPLIT</th><th>BA</th><th>RECALL</th><th>SPECIFICITY</th><th>F1</th><th>ROC-AUC</th><th>N</th></tr></thead><tbody id="seed-summary-rows"></tbody></table>
+                </div>
+              </section>
+              <section id="oof-detail" class="card chart-card">
+                <div class="section-heading"><div><div class="eyebrow">OUT-OF-FOLD · SELECTED SEED</div><h2>OOF event probabilities</h2></div><span class="threshold-chip compact" id="oof-threshold">Threshold —</span></div>
+                <div class="data-limitation"><b>Metrics use consensus events only (A1 = A2).</b> The plot and table retain A1/A2 disagreements as separate inspection rows; they do not enter consensus metrics. Event identity is unavailable, so points use source array order only and cannot be linked to a patient, action, waveform, or HDF5 row.</div>
+                <div class="probability-wrap" id="oof-plot"></div>
+                <div class="table-scroll seed-event-scroll"><table><thead><tr><th>ARRAY INDEX</th><th>A1 / A2</th><th>SOFT TARGET</th><th>PROBABILITY</th><th>THRESHOLD</th><th>MODEL</th><th>STATUS</th></tr></thead><tbody id="oof-rows"></tbody></table></div>
+              </section>
+              <section id="test-detail" class="card test-summary hidden">
+                <div class="section-heading"><div><div class="eyebrow">FINAL TEST · SELECTED SEED</div><h2>Aggregate test result</h2></div><span class="threshold-chip compact" id="test-threshold">Threshold —</span></div>
+                <div class="data-limitation"><b>Only aggregate final-test results were saved.</b> Event-level probabilities and identifiers are absent from the run artifacts.</div>
+                <div class="test-content"><div class="test-metrics" id="test-metrics"></div><div class="confusion-wrap" id="confusion-matrix"></div></div>
+              </section>
+            </section>
+
+            <footer class="page-footer"><span>Research inspection · not a diagnostic tool</span><span id="footer-data">Browser-side analysis · local data</span></footer>
+          </div>
+        </main>
+      </div>
+    </div>
+    <dialog id="about-dialog" class="about-dialog">
+      <form method="dialog"><button class="dialog-close" aria-label="Close">×</button></form>
+      <div class="eyebrow">ABOUT THIS VIEWER</div><h2>Inspect stored results. Keep interpretation careful.</h2>
+      <p>Predictions, annotations and source signals are presented for research inspection. A1/A2 disagreements remain separate; probability and waveform appearance alone do not establish a labeling error.</p>
+      <p>Consensus metrics use events with matching binary labels. Balanced accuracy is not applicable for a single-class patient. Confidence flags are inspection heuristics, not clinical thresholds.</p>
+    </dialog>
+  </body>
+</html>

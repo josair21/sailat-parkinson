@@ -66,7 +66,9 @@ Build and deploy a clean, static, browser-side LOSO inspection dashboard at `par
 ## Current status
 
 - Phase 1 inventory has begun using the read-only `liveserver` source. The selected `6ch_pretrain_weak` example has five per-seed OOF/test metric folders and a `loso_seed42` global prediction folder. The source HDF5 is 88.6 MB.
-- An offline conversion script and format documentation are in this repository. The intended command and generated layout are in `CONVERSION.md`.
-- No converted assets have been generated, uploaded, or committed. No source files were modified.
+- Offline conversion is split into a one-time shared dataset package and small per-run result packages. New runs reference the same content-derived `dataset_id`; see `CONVERSION.md`.
+- The shared dataset converter emits filtered 20 Hz signal previews, 0–20 Hz Welch spectra, and band-power summaries computed from the 100 Hz source. It preserves every source HDF5 row, action string, and A1/A2 label pair, including transition actions. Schema v3 packages are generated locally under ignored `local-data/v3/`; original-rate waveforms remain offline.
+- A static local UI now covers Global LOSO, per-seed OOF, and final-test aggregate metrics. The static server listens on loopback at port 8765.
+- Global LOSO now includes run-wide per-action and filename-side metrics from a precomputed summary. Only binary consensus events contribute to performance metrics; disagreement and side-assignment coverage are reported separately. Actions without event predictions in this LOSO artifact cannot receive prediction metrics.
 - OOF per-event identities and final-test per-event predictions are not present in the current artifacts. Full patient/event-level OOF/test inspection requires future training exports with identifiers and predictions.
-- Before running conversion, review HDF5 event-match ambiguity and confirm the 100 Hz source signal rate. Before uploading, establish the Cloudflare Access path for both app and data, authorization, and retention policy.
+- Before running conversion, review HDF5 event-match ambiguity. Before uploading, establish the Cloudflare Access path for both app and data, authorization, and retention policy.

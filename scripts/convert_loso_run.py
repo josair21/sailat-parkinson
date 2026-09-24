@@ -9,27 +9,96 @@ separate private object store, not for Git.
 from __future__ import annotations
 
 import argparse
-import csv
-import gzip
 import hashlib
 import json
 import math
+import re
 import shutil
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
-import h5py
 import numpy as np
 import yaml
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 CHANNELS = ["acc_x", "acc_y", "acc_z", "gyr_x", "gyr_y", "gyr_z"]
 UNITS = ["m/s^2", "m/s^2", "m/s^2", "deg/s", "deg/s", "deg/s"]
 REQUIRED_NPZ_KEYS = ("probability", "label", "label_a1", "label_a2", "patient", "action")
-H5_ROOT_FIELDS = ("subject_id", "action", "score_a1", "score_a2", "filename", "device")
+DATASET_SCHEMA_VERSION = 3
+
+
+def _stratified_metrics(events: list[dict[str, Any]]) -> dict[str, Any]:
+    tp = tn = fp = fn = disagreements = nonbinary = 0
+    for event in events:
+        a1, a2 = event["a1"], event["a2"]
+        if a1 != a2:
+            disagreements += 1
+            continue
+        if a1 not in (0, 1):
+            nonbinary += 1
+            continue
+        predicted = event["predicted_class"]
+        if a1 == 1 and predicted == 1: tp += 1
+        elif a1 == 1: fn += 1
+        elif predicted == 0: tn += 1
+        else: fp += 1
+    positives, negatives = tp + fn, tn + fp
+    recall = tp / positives if positives else None
+    specificity = tn / negatives if negatives else None
+    return {
+        "event_count": len(events), "consensus_count": tp + tn + fp + fn,
+        "disagreement_count": disagreements, "nonbinary_consensus_count": nonbinary,
+        "positive_count": positives, "negative_count": negatives,
+        "tp": tp, "tn": tn, "fp": fp, "fn": fn,
+        "recall": recall, "specificity": specificity,
+        "fnr": fn / positives if positives else None,
+        "fpr": fp / negatives if negatives else None,
+        "balanced_accuracy": (recall + specificity) / 2 if recall is not None and specificity is not None else None,
+    }
+
+
+def _event_filename_side(event: dict[str, Any]) -> str | None:
+    candidates = event.get("signal_match", {}).get("candidates", [])
+    if not candidates:
+        return None
+    sides = set()
+    for candidate in candidates:
+        filename = candidate.get("source_filename") or ""
+        match = re.search(r"\.(00|01)(?=_|$)", filename)
+        if not match:
+            return None
+        sides.add("Non-dominant" if match.group(1) == "00" else "Dominant")
+    return next(iter(sides)) if len(sides) == 1 else None
+
+
+def _stratified_summary(events: list[dict[str, Any]], threshold: float) -> dict[str, Any]:
+    by_action: dict[str, list[dict[str, Any]]] = {}
+    by_side: dict[str, list[dict[str, Any]]] = {"Dominant": [], "Non-dominant": []}
+    no_candidate = uncertain_side = 0
+    for event in events:
+        by_action.setdefault(event["action"], []).append(event)
+        candidates = event.get("signal_match", {}).get("candidates", [])
+        side = _event_filename_side(event)
+        if side:
+            by_side[side].append(event)
+        elif not candidates:
+            no_candidate += 1
+        else:
+            uncertain_side += 1
+    return {
+        "schema_version": 1,
+        "threshold": threshold,
+        "by_action": [{"group": action, **_stratified_metrics(group)} for action, group in sorted(by_action.items())],
+        "by_filename_side": [{"group": side, **_stratified_metrics(group)} for side, group in by_side.items()],
+        "side_coverage": {"assigned_events": sum(map(len, by_side.values())), "no_candidate_events": no_candidate,
+                          "uncertain_candidate_side_events": uncertain_side},
+        "notes": ["Performance metrics use only binary consensus events (A1 == A2 and label in {0, 1}); disagreements and nonbinary consensus are counted separately.",
+                  "Predictions use the threshold stored in this LOSO run.",
+                  "Filename suffix .00 maps to Non-dominant and .01 maps to Dominant. Events are assigned only when all candidate filenames support the same side."],
+    }
 
 
 def _json_dump(path: Path, value: Any) -> None:
@@ -64,7 +133,7 @@ def _json_safe(value: Any, label: str = "metrics") -> Any:
     if isinstance(value, (np.floating, float)):
         number = float(value)
         if not math.isfinite(number):
-            raise ValueError(f"Non-finite numeric value in {label}")
+            return "NaN" if math.isnan(number) else ("Infinity" if number > 0 else "-Infinity")
         return number
     if isinstance(value, (str, int, bool)) or value is None:
         return value
@@ -79,54 +148,47 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _load_metadata(path: Path) -> dict[str, list[dict[str, Any]]]:
-    """Keep source CSV values and repeated measurements without guessing."""
-    result: dict[str, list[dict[str, Any]]] = {}
-    with path.open("r", encoding="utf-8-sig", newline="") as stream:
-        reader = csv.DictReader(stream)
-        if not reader.fieldnames or "VB-ID" not in reader.fieldnames:
-            raise ValueError(f"Metadata CSV must contain the documented 'VB-ID' column: {path}")
-        for row in reader:
-            patient_id = (row.get("VB-ID") or "").strip()
-            if not patient_id:
-                continue
-            result.setdefault(patient_id, []).append(
-                {key: (value if value != "" else None) for key, value in row.items() if key is not None}
-            )
-    return result
-
-
-def _read_h5_index(h5: h5py.File) -> list[dict[str, Any]]:
-    missing = [key for key in H5_ROOT_FIELDS if key not in h5]
-    if missing or "X" not in h5 or not isinstance(h5["X"], h5py.Group):
-        raise ValueError(f"Unknown HDF5 schema; missing root fields {missing} or X group")
-    count = len(h5["subject_id"])
-    for key in H5_ROOT_FIELDS:
-        if len(h5[key]) != count:
-            raise ValueError(f"HDF5 schema length mismatch: {key} has {len(h5[key])}, expected {count}")
-
-    rows = []
-    for index in range(count):
-        signal_key = str(index)
-        if signal_key not in h5["X"]:
-            raise ValueError(f"HDF5 X group has no dataset for source row {index}")
-        dataset = h5["X"][signal_key]
-        if dataset.ndim != 2 or dataset.shape[1] != 6 or dataset.dtype.kind != "f" or dataset.dtype.itemsize != 4:
-            raise ValueError(f"Unexpected HDF5 X[{index}] schema: shape={dataset.shape}, dtype={dataset.dtype}")
-        rows.append(
-            {
-                "index": index,
-                "patient_id": _text(h5["subject_id"][index], "subject_id"),
-                "action": _text(h5["action"][index], "action"),
-                "a1": int(h5["score_a1"][index]),
-                "a2": int(h5["score_a2"][index]),
-                "filename": Path(_text(h5["filename"][index], "filename")).name,
-                "device": _text(h5["device"][index], "device"),
-                "sample_count": int(dataset.shape[0]),
-                "dataset": dataset,
-            }
-        )
-    return rows
+def _read_dataset_index(dataset_package: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    manifest_path = dataset_package / "manifest.json"
+    index_path = dataset_package / "index.json"
+    if not manifest_path.is_file() or not index_path.is_file():
+        raise FileNotFoundError(f"Dataset package needs manifest.json and index.json: {dataset_package}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    if manifest.get("schema_version") != DATASET_SCHEMA_VERSION or index.get("schema_version") != DATASET_SCHEMA_VERSION:
+        raise ValueError("Unsupported shared dataset package schema version")
+    dataset_id = manifest.get("dataset_id")
+    if not isinstance(dataset_id, str) or len(dataset_id) != 64:
+        raise ValueError("Shared dataset package has an invalid dataset_id")
+    rows = index.get("signals")
+    if not isinstance(rows, list) or len(rows) != manifest.get("counts", {}).get("signals"):
+        raise ValueError("Shared dataset signal index does not match its manifest count")
+    required = {"source_h5_index", "patient_id", "action", "a1", "a2", "sample_count", "duration_s", "signal_ref", "frequency_summary", "spectrum_ref", "spectrum_frequency_count", "spectrum_nperseg", "spectrum_max_frequency_hz"}
+    for row in rows:
+        if not isinstance(row, dict) or not required.issubset(row):
+            raise ValueError("Shared dataset index contains a row with an unknown schema")
+        summary = row["frequency_summary"]
+        if not isinstance(summary, dict) or summary.get("bands_hz") != [[3.0, 7.0], [7.0, 10.0], [10.0, 12.0], [3.0, 12.0]]:
+            raise ValueError("Shared dataset index has an unsupported frequency-summary schema")
+        channel_power = summary.get("channel_band_power")
+        if not isinstance(channel_power, list) or len(channel_power) != len(CHANNELS) or any(
+            not isinstance(channel, list) or len(channel) != 4 or any(not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0 for value in channel)
+            for channel in channel_power
+        ):
+            raise ValueError("Shared dataset index contains invalid frequency band powers")
+        if not isinstance(row["spectrum_frequency_count"], int) or row["spectrum_frequency_count"] < 1:
+            raise ValueError("Shared dataset index contains an invalid spectrum bin count")
+        if not isinstance(row["spectrum_nperseg"], int) or row["spectrum_nperseg"] < 8:
+            raise ValueError("Shared dataset index contains an invalid Welch segment length")
+        if not isinstance(row["spectrum_max_frequency_hz"], (int, float)) or not 0 < row["spectrum_max_frequency_hz"] <= 20:
+            raise ValueError("Shared dataset index contains an invalid spectrum frequency limit")
+        ref = Path(row["signal_ref"])
+        if ref.is_absolute() or ".." in ref.parts or not (dataset_package / ref).is_file():
+            raise ValueError(f"Shared dataset signal is missing or unsafe: {row['signal_ref']}")
+        spectrum_ref = Path(row["spectrum_ref"])
+        if spectrum_ref.is_absolute() or ".." in spectrum_ref.parts or not (dataset_package / spectrum_ref).is_file():
+            raise ValueError(f"Shared dataset spectrum is missing or unsafe: {row['spectrum_ref']}")
+    return manifest, rows
 
 
 def _read_events(npz_path: Path, expected_patient: str, threshold: float) -> list[dict[str, Any]]:
@@ -183,35 +245,15 @@ def _read_events(npz_path: Path, expected_patient: str, threshold: float) -> lis
         return events
 
 
-def _signal_blob(output: Path, h5_row: dict[str, Any]) -> tuple[str, int]:
-    signal_id = f"h5_{h5_row['index']:04d}"
-    relative = Path("signals") / f"{signal_id}.f32.gz"
-    target = output / relative
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if not target.exists():
-        expected_shape = h5_row["dataset"].shape
-        values = np.asarray(h5_row["dataset"][:], dtype="<f4", order="C")
-        with target.open("wb") as raw:
-            with gzip.GzipFile(filename="", mode="wb", compresslevel=6, fileobj=raw, mtime=0) as zipped:
-                zipped.write(values.tobytes(order="C"))
-        with gzip.open(target, "rb") as zipped:
-            restored = np.frombuffer(zipped.read(), dtype="<f4").reshape(expected_shape)
-        if not np.array_equal(restored, values, equal_nan=True):
-            raise ValueError(f"Signal round-trip mismatch for HDF5 source row {h5_row['index']}")
-    return relative.as_posix(), target.stat().st_size
-
-
 def _match_events(
-    output: Path,
     events: list[dict[str, Any]],
     patient_id: str,
-    h5_rows: list[dict[str, Any]],
-    sample_rate_hz: float,
+    signal_rows: list[dict[str, Any]],
     max_duration_difference_s: float,
     tie_tolerance_s: float,
 ) -> dict[str, int]:
     by_attributes: dict[tuple[str, str, int, int], list[dict[str, Any]]] = {}
-    for row in h5_rows:
+    for row in signal_rows:
         by_attributes.setdefault((row["patient_id"], row["action"], row["a1"], row["a2"]), []).append(row)
 
     proposals: dict[int, list[dict[str, Any]]] = {}
@@ -234,7 +276,7 @@ def _match_events(
 
         ranked = sorted(
             (
-                (abs(row["sample_count"] / sample_rate_hz - event["duration_s"]), row["index"]),
+                (abs(row["duration_s"] - event["duration_s"]), row["source_h5_index"]),
                 row,
             )
             for row in candidates
@@ -264,7 +306,7 @@ def _match_events(
     proposal_owners: dict[int, list[dict[str, Any]]] = {}
     for event in events:
         for row in proposals.get(id(event), []):
-            proposal_owners.setdefault(row["index"], []).append(event)
+            proposal_owners.setdefault(row["source_h5_index"], []).append(event)
     collision_events: set[int] = set()
     for owners in proposal_owners.values():
         if len(owners) > 1:
@@ -281,25 +323,27 @@ def _match_events(
             proposed = [
                 row for row in by_attributes.get((patient_id, event["action"], event["a1"], event["a2"]), [])
                 if event["duration_s"] is None
-                or abs(row["sample_count"] / sample_rate_hz - event["duration_s"]) <= max_duration_difference_s
+                or abs(row["duration_s"] - event["duration_s"]) <= max_duration_difference_s
             ]
         if match["status"] == "ambiguous" and not proposed:
             proposed = by_attributes.get((patient_id, event["action"], event["a1"], event["a2"]), [])
 
         details = []
         for row in proposed:
-            duration = row["sample_count"] / sample_rate_hz
-            blob, compressed_bytes = _signal_blob(output, row)
             details.append(
                 {
-                    "source_h5_index": row["index"],
-                    "signal_ref": blob,
+                    "source_h5_index": row["source_h5_index"],
+                    "signal_ref": row["signal_ref"],
                     "sample_count": row["sample_count"],
-                    "duration_s_from_explicit_rate": duration,
-                    "duration_difference_s": abs(duration - event["duration_s"]) if event["duration_s"] is not None else None,
-                    "device": row["device"],
-                    "source_filename": row["filename"],
-                    "compressed_bytes": compressed_bytes,
+                    "duration_s_from_shared_dataset": row["duration_s"],
+                    "duration_difference_s": abs(row["duration_s"] - event["duration_s"]) if event["duration_s"] is not None else None,
+                    "device": row.get("device"),
+                    "source_filename": row.get("source_filename"),
+                    "frequency_summary": row["frequency_summary"],
+                    "spectrum_ref": row["spectrum_ref"],
+                    "spectrum_frequency_count": row["spectrum_frequency_count"],
+                    "spectrum_nperseg": row["spectrum_nperseg"],
+                    "spectrum_max_frequency_hz": row["spectrum_max_frequency_hz"],
                 }
             )
         match["candidates"] = details
@@ -434,15 +478,8 @@ def _args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-root", required=True, type=Path, help="Run family directory, e.g. liveserver/runs/6ch_pretrain_weak")
     parser.add_argument("--loso-run", required=True, help="LOSO child directory, e.g. loso_seed42")
-    parser.add_argument("--hdf5", required=True, type=Path, help="Unchanged source HDF5 file")
-    parser.add_argument("--metadata-csv", required=True, type=Path, help="Unchanged A1 protocol metadata CSV")
+    parser.add_argument("--dataset-package", required=True, type=Path, help="Previously converted shared dataset package")
     parser.add_argument("--output", required=True, type=Path, help="New output directory outside Git")
-    parser.add_argument(
-        "--signal-sampling-rate-hz",
-        type=float,
-        default=100.0,
-        help="Verified sampling rate of the HDF5 X signals; not the model-input rate in config.yml",
-    )
     parser.add_argument("--max-duration-difference-s", type=float, default=0.5)
     parser.add_argument("--tie-tolerance-s", type=float, default=0.01)
     return parser.parse_args()
@@ -452,19 +489,23 @@ def main() -> int:
     args = _args()
     run_root = args.run_root.resolve()
     loso_dir = (run_root / args.loso_run).resolve()
-    h5_path, metadata_path, output = args.hdf5.resolve(), args.metadata_csv.resolve(), args.output.resolve()
-    sample_rate = _finite(args.signal_sampling_rate_hz, "--signal-sampling-rate-hz")
-    if sample_rate <= 0:
-        raise ValueError("--signal-sampling-rate-hz must be positive")
+    dataset_package, output = args.dataset_package.resolve(), args.output.resolve()
     if args.max_duration_difference_s < 0 or args.tie_tolerance_s < 0:
         raise ValueError("duration tolerances must be nonnegative")
-    if not loso_dir.is_dir() or not h5_path.is_file() or not metadata_path.is_file():
-        raise FileNotFoundError("Run child, HDF5, or metadata CSV path does not exist")
+    if not loso_dir.is_dir():
+        raise FileNotFoundError(f"LOSO result directory does not exist: {loso_dir}")
     if output.exists():
         raise FileExistsError(f"Output already exists; choose a new output path: {output}")
-    for source in (run_root, h5_path, metadata_path):
-        if output == source or output in source.parents:
+    for source in (run_root, dataset_package):
+        if output == source or output in source.parents or source in output.parents:
             raise ValueError(f"Output must not be inside or overwrite a source path: {source}")
+
+    dataset_manifest, signal_rows = _read_dataset_index(dataset_package)
+    dataset_id = dataset_manifest["dataset_id"]
+    dataset_signal_rate = _finite(dataset_manifest["signal"]["sampling_rate_hz"], "shared dataset display signal rate")
+    dataset_source_rate = _finite(dataset_manifest["signal"]["source_sampling_rate_hz"], "shared dataset source signal rate")
+    if dataset_source_rate != 100.0 or dataset_signal_rate != 20.0:
+        raise ValueError(f"Expected 100 Hz source and 20 Hz display signals, dataset package says {dataset_source_rate} Hz source / {dataset_signal_rate} Hz display")
 
     metadata_path_yaml = loso_dir / "loso_metadata.yml"
     if not metadata_path_yaml.is_file():
@@ -477,7 +518,6 @@ def main() -> int:
     if not 0 <= threshold <= 1:
         raise ValueError("Stored threshold is outside [0, 1]")
 
-    metadata_by_patient = _load_metadata(metadata_path)
     strategy = run_metadata.get("strategy")
     if not isinstance(strategy, str) or not strategy:
         raise ValueError(f"Stored strategy missing from {metadata_path_yaml}")
@@ -489,60 +529,71 @@ def main() -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     temp_path = Path(tempfile.mkdtemp(prefix=f".{output.name}.building-", dir=output.parent))
     try:
-        with h5py.File(h5_path, "r") as h5:
-            h5_rows = _read_h5_index(h5)
-            all_events = 0
-            totals = {"matched": 0, "ambiguous": 0, "unmatched": 0}
-            patient_summaries = []
-            for npz_path in patient_files:
-                patient_id = npz_path.parent.name.removeprefix("patient_")
-                events = _read_events(npz_path, patient_id, threshold)
-                all_events += len(events)
-                # _match_events emits only a selected signal or tied alternatives.
-                counts = _match_events(
-                    temp_path,
-                    events,
-                    patient_id,
-                    h5_rows,
-                    sample_rate,
-                    args.max_duration_difference_s,
-                    args.tie_tolerance_s,
-                )
-                for key, value in counts.items():
-                    totals[key] += value
-                patient_record = {
+        all_events = 0
+        totals = {"matched": 0, "ambiguous": 0, "unmatched": 0}
+        patient_summaries = []
+        stratified_events = []
+        metadata_counts = dataset_manifest.get("metadata", {}).get("metadata_records_by_patient", {})
+        for npz_path in patient_files:
+            patient_id = npz_path.parent.name.removeprefix("patient_")
+            events = _read_events(npz_path, patient_id, threshold)
+            all_events += len(events)
+            counts = _match_events(
+                events,
+                patient_id,
+                signal_rows,
+                args.max_duration_difference_s,
+                args.tie_tolerance_s,
+            )
+            for key, value in counts.items():
+                totals[key] += value
+            stratified_events.extend(events)
+            relative_patient_path = Path("patients") / f"{patient_id}.json"
+            _json_dump(
+                temp_path / relative_patient_path,
+                {
                     "patient_id": patient_id,
-                    "metadata_records": metadata_by_patient.get(patient_id, []),
-                    "metadata_match_count": len(metadata_by_patient.get(patient_id, [])),
+                    "shared_metadata_ref": f"patients/{patient_id}.json",
+                    "metadata_match_count": metadata_counts.get(patient_id, 0),
+                    "prediction_source": npz_path.name,
+                    "prediction_sha256": _sha256(npz_path),
                     "events": events,
+                },
+            )
+            patient_summaries.append(
+                {
+                    "patient_id": patient_id,
+                    "event_count": len(events),
+                    "shared_metadata_ref": f"patients/{patient_id}.json",
+                    "metadata_match_count": metadata_counts.get(patient_id, 0),
+                    "prediction_sha256": _sha256(npz_path),
+                    "data_ref": relative_patient_path.as_posix(),
                 }
-                relative_patient_path = Path("patients") / f"{patient_id}.json"
-                _json_dump(temp_path / relative_patient_path, patient_record)
-                patient_summaries.append(
-                    {
-                        "patient_id": patient_id,
-                        "event_count": len(events),
-                        "metadata_match_count": patient_record["metadata_match_count"],
-                        "data_ref": relative_patient_path.as_posix(),
-                    }
-                )
+            )
 
+        stratified_summary_ref = "stratified_summary.json"
+        _json_dump(temp_path / stratified_summary_ref, _stratified_summary(stratified_events, threshold))
         manifest = {
             "schema_version": SCHEMA_VERSION,
             "run_id": f"{run_root.name}__{args.loso_run}",
             "run_family": run_root.name,
             "loso_run": args.loso_run,
+            "dataset_id": dataset_id,
+            "dataset_manifest_ref": f"datasets/{dataset_id}/manifest.json",
+            "dataset_assets_prefix": f"datasets/{dataset_id}/",
             "threshold": threshold,
             "threshold_source": "stored loso_metadata.yml; not optimized by converter",
+            "stratified_summary_ref": stratified_summary_ref,
             "signal": {
-                "source": "HDF5 X dataset",
-                "processing_state": "GW4 six-channel HDF5 X array as stored; no filtering or resampling performed by converter",
-                "sampling_rate_hz": sample_rate,
-                "sampling_rate_source": "--signal-sampling-rate-hz; 100 Hz default for the original GW4 source",
+                "source": "shared GW4 six-channel HDF5 X dataset package",
+                "processing_state": dataset_manifest["signal"]["processing_state"],
+                "sampling_rate_hz": dataset_signal_rate,
+                "source_sampling_rate_hz": dataset_source_rate,
+                "sampling_rate_source": "shared converted browser preview dataset manifest",
                 "model_input_sampling_rate_hz": model_sampling_rate,
                 "model_input_sampling_rate_source": "selected seed run config and experiment metrics",
                 "armband_sampling_rate_hz": 50.0,
-                "armband_note": "Armband signals are not present in this HDF5 X six-channel schema and are not converted.",
+                "armband_note": "Armband signals are not present in the shared six-channel HDF5 X package.",
                 "channels": CHANNELS,
                 "units": UNITS,
                 "dtype": "float32 little-endian",
@@ -550,16 +601,12 @@ def main() -> int:
             },
             "matching": {
                 "attributes": ["patient_id", "action", "a1", "a2"],
-                "duration_method": "closest HDF5 sample_count / explicit signal rate to prediction duration",
+                "duration_method": "closest shared dataset sample_count / source rate to prediction duration",
                 "max_duration_difference_s": args.max_duration_difference_s,
                 "tie_tolerance_s": args.tie_tolerance_s,
                 "reused_source_signals": "marked ambiguous; never silently attached to multiple prediction events",
             },
             "source": {
-                "hdf5_filename": h5_path.name,
-                "hdf5_sha256": _sha256(h5_path),
-                "metadata_filename": metadata_path.name,
-                "metadata_sha256": _sha256(metadata_path),
                 "loso_metadata_filename": metadata_path_yaml.name,
                 "loso_metadata_sha256": _sha256(metadata_path_yaml),
             },
@@ -580,12 +627,13 @@ def main() -> int:
             "run_id": manifest["run_id"],
             "counts": manifest["counts"],
             "seed_result_count": len(seed_summaries),
-            "source_hdf5_bytes": h5_path.stat().st_size,
-            "generated_bytes_excluding_this_report": sum(path.stat().st_size for path in temp_path.rglob("*") if path.is_file()),
+            "shared_dataset_id": dataset_id,
+            "run_package_bytes_excluding_this_report": sum(path.stat().st_size for path in temp_path.rglob("*") if path.is_file()),
             "notes": [
-                "No model weights, scaler objects, or source HDF5 were copied.",
+                "No dataset signals, patient metadata, model weights, or scaler objects were copied into this run package.",
                 "Events without a valid signal match remain available with an explicit unmatched status.",
                 "Ambiguous candidates retain source row, device, and source filename for researcher review.",
+                "Run-wide stratified action and filename-side metrics are in stratified_summary.json; side assignments require candidate filenames to agree.",
                 "OOF logits/labels have no patient, action, duration, or source-event identifiers in the supplied NPZ; only array-order analysis is possible.",
                 "Seed final-test artifacts contain aggregate metrics, not all event-level predictions.",
             ],

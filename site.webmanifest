@@ -1,0 +1,20 @@
+{
+  "name": "Parkinson Results Analysis",
+  "short_name": "Parkinson Results",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f5f7fa",
+  "theme_color": "#f5f7fa",
+  "icons": [
+    {
+      "src": "assets/icons/parkinson-viewer-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "assets/icons/parkinson-viewer-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
