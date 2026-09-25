@@ -47,14 +47,15 @@ Primary flow:
 - GW4 source signals are 100 Hz; the private browser package serves filtered 20 Hz previews. Precomputed Welch spectra (0–20 Hz) and per-channel band powers (3–7, 7–10, 10–12, and 3–12 Hz) come from the original source before resampling. All 1,608 HDF5 rows retain their action strings and raw A1/A2 labels, including transition actions. The model input is separately resampled to 64 Hz. Armband 50 Hz signals are not present in the selected six-channel HDF5 `X` schema.
 - Signal matching can be ambiguous or unmatched for some global LOSO events. Converter output reports these cases explicitly; review them before interpreting signal/event links.
 - Institutional/cloud storage authorization, Cloudflare account limits, Access protection for both the site and data, and retention/backups remain to be confirmed before upload.
-- Raw data, predictions, annotations, credentials, and private exports must not enter the Git repository.
+- Personal data must not enter GitHub, whether raw, pseudonymized, or converted. Only non-identifying processed aggregate outputs may be committed. Credentials and original source files also remain excluded.
 - A static site or static object URL is public unless access protection has been explicitly configured and verified.
 
 ## Current implementation status
 
 - Static browser UI exists in `index.html`, `styles.css`, and `app.js` for Global LOSO patient/event inspection, seed-level OOF distributions, and aggregate final-test metrics.
 - Local shared dataset package contains 1,608 GW4 signal records and 88 patient metadata records. The example LOSO package contains 78 patients and 675 events (344 unique signal links, 206 ambiguous, 125 unmatched).
-- The static server binds to `127.0.0.1:8765`; local data and catalog are ignored by Git. The shared dataset uses schema v3. The current run package uses schema v3 and includes offline run-wide performance summaries by predicted action and filename-derived side; it has not been uploaded.
+- The static server binds to `127.0.0.1:8765`. The dashboard starts with separate dataset ZIP and run JSON selectors; it caches the selected pair in browser IndexedDB for up to 24 hours so refreshes can restore the workspace. Files are not sent to the server. A Forget saved files control removes the browser copy. Converted patient-level files remain local and ignored by Git. The shared dataset and run package use schema v3.
+- The run converter detects LOSO-plus-seed versus seed-only source layouts and emits one compact `run.json` with embedded patient and seed records. It omits per-epoch intermediates and all model/pretraining weights. The browser accepts inline records and remains compatible with split run files. Example outputs are local under ignored `local-data/run-json/`.
 - Current stratified summaries cover 675 stored LOSO event predictions across kinetic, postural, rest-end, and rest-start actions. The source dataset also preserves other actions, including transition and task actions, but this LOSO run has no event predictions for those actions. Filename suffix `.00`/`.01` is used for non-dominant/dominant grouping only when candidate filenames consistently agree. Side grouping excludes 275 events with no candidates or uncertain candidate-side codes.
 - No Cloudflare resources, uploads, authentication configuration, or public deployment have been created.
 - OOF and final-test source-artifact limitations remain as documented above.

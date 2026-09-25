@@ -1,11 +1,15 @@
-# Converted research data; keep generated packages outside Git.
+# Converted research data packages used by the static dashboard.
 generated_data/
 conversion_output/
-/local-data/
+/raw_data/
 /data/
 /runs/
+/local-data/*.json
+/local-data/*.zip
+/local-data/**/*.json
+/local-data/**/*.zip
+/local-data/**/*.f32.gz
 *.h5
 *.npz
 *.pth
 *.pkl
-*.f32.gz

@@ -30,6 +30,7 @@
         </div>
         <div class="topbar-right">
           <span class="local-indicator"><span></span> LOCAL WORKSPACE</span>
+          <button class="button secondary hidden" id="change-data-button" type="button">Change files</button>
           <label class="theme-control"><span>Theme</span><select id="theme-select" aria-label="Color theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
           <button class="icon-button" id="about-button" type="button" aria-label="About this dashboard">i</button>
         </div>
@@ -76,16 +77,6 @@
             </select>
           </div>
 
-          <div id="seed-controls" class="sidebar-section context-controls hidden">
-            <div class="side-label">SEED ANALYSIS</div>
-            <label class="field-label" for="seed-select">Training seed</label>
-            <select id="seed-select" disabled><option>Choose a seed</option></select>
-            <div class="segmented" role="tablist" aria-label="Seed split">
-              <button class="segment active" type="button" data-split="oof" role="tab" aria-selected="true">OOF</button>
-              <button class="segment" type="button" data-split="test" role="tab" aria-selected="false">Final test</button>
-            </div>
-          </div>
-
           <div class="sidebar-bottom">
             <div class="dataset-status"><span class="status-dot"></span><div><b>Shared dataset</b><small id="dataset-status">Loading manifest…</small></div></div>
             <p>Source signals load only when an event is selected.</p>
@@ -94,9 +85,26 @@
 
         <main class="main-content">
           <section id="loading-state" class="state-card">
-            <div class="loader"></div>
-            <h1>Opening local workspace</h1>
-            <p>Reading the run catalog and summary files.</p>
+            <div class="eyebrow">PRIVATE LOCAL WORKSPACE</div>
+            <h1>Load a dataset and run</h1>
+            <p>Choose the dataset ZIP and its matching run JSON. The dashboard keeps a browser-local copy for up to 24 hours so a refresh does not require another upload. Files are never sent to the server.</p>
+            <div class="upload-grid">
+              <label class="upload-block" for="dataset-file">
+                <span class="upload-kicker">01 · SHARED DATASET</span><strong>Dataset archive</strong>
+                <span class="upload-description">Choose the converted dataset ZIP</span>
+                <span class="upload-file-name" id="dataset-file-name">No file selected</span>
+                <input id="dataset-file" type="file" accept=".zip,application/zip">
+              </label>
+              <label class="upload-block" for="run-file">
+                <span class="upload-kicker">02 · EXPERIMENT RESULTS</span><strong>Run results</strong>
+                <span class="upload-description">Choose one converted run JSON</span>
+                <span class="upload-file-name" id="run-file-name">No file selected</span>
+                <input id="run-file" type="file" accept=".json,application/json">
+              </label>
+            </div>
+            <p class="upload-status" id="upload-status" aria-live="polite">Select both files to continue.</p>
+            <button class="button secondary upload-submit" id="open-workspace-button" type="button" disabled>Open dashboard</button>
+            <button class="button secondary upload-forget" id="forget-data-button" type="button" disabled>Forget saved files</button>
           </section>
 
           <section id="error-state" class="state-card hidden" role="alert">
@@ -110,13 +118,19 @@
             <div class="page-heading">
               <div>
                 <div class="eyebrow">PARKINSONIAN TREMOR <span>/</span> ERROR ANALYSIS</div>
-                <h1 id="page-title">Global LOSO inspection</h1>
-                <p id="page-subtitle">Inspect held-out patient predictions, then open a source signal.</p>
+                <h1 id="page-title">Global LOSO overview</h1>
+                <p id="page-subtitle">Review run-wide action and filename-side results, then inspect individual patients.</p>
               </div>
               <div class="threshold-chip" id="threshold-chip"><span class="chip-label">FROZEN THRESHOLD</span><b>—</b></div>
             </div>
 
             <section id="global-view" class="view-panel">
+              <div class="global-tabs" role="tablist" aria-label="Global LOSO section">
+                <button class="global-tab active" id="overview-tab" type="button" role="tab" aria-selected="true" aria-controls="overview-panel" data-global-tab="overview">Overview</button>
+                <button class="global-tab" id="subject-tab" type="button" role="tab" aria-selected="false" aria-controls="subject-panel" data-global-tab="subject">Subject</button>
+                <button class="global-tab" id="cohort-tab" type="button" role="tab" aria-selected="false" aria-controls="cohort-panel" data-global-tab="cohort">Cohort <span id="cohort-count">â€”</span></button>
+              </div>
+              <section id="overview-panel">
               <div class="kpi-grid" id="global-kpis"></div>
               <section class="card stratified-card">
                 <div class="section-heading stratified-heading">
@@ -129,6 +143,22 @@
                 </div>
                 <p class="stratified-note" id="dominance-results-note"></p>
               </section>
+              <section class="card action-boxplot-card">
+                <div class="section-heading stratified-heading">
+                  <div><div class="eyebrow">STORED PREDICTIONS</div><h2>Tremor probability by action</h2></div>
+                  <span class="stratified-threshold" id="action-boxplot-status">Loading event summariesâ€¦</span>
+                </div>
+                <div class="action-boxplot-legend" aria-label="Boxplot groups">
+                  <span><i class="boxplot-swatch consensus-negative"></i>Consensus negative</span>
+                  <span><i class="boxplot-swatch consensus-positive"></i>Consensus positive</span>
+                  <span><i class="boxplot-swatch disagreement-group"></i>A1/A2 disagreement</span>
+                  <span><i class="boxplot-swatch other-consensus"></i>Other consensus</span>
+                </div>
+                <div class="action-boxplot-scroll" id="action-boxplot"><div class="empty-inline">Loading stored event probabilities. Signal assets are not loaded.</div></div>
+                <p class="stratified-note">Boxes show the median and interquartile range of stored tremor probabilities; whiskers extend to points within 1.5 Ã— IQR. The dashed line is the runâ€™s stored threshold. Disagreements are shown separately and are not treated as ground truth.</p>
+              </section>
+              </section>
+              <div id="subject-panel" class="hidden">
               <section class="patient-card card">
                 <div class="patient-main">
                   <div class="patient-avatar" id="patient-avatar">—</div>
@@ -189,16 +219,45 @@
                   <div class="axis-caption">Precomputed Welch PSD from 0–20 Hz, plus integrated 3–7, 7–10, 10–12, and 3–12 Hz band powers (10–12 Hz comes from the 100 Hz source, not the 20 Hz preview).</div>
                 </div>
               </section>
+              </div>
+              <section id="cohort-panel" class="hidden">
+                <section class="card cohort-controls">
+                  <label><span>Difficulty metric</span><select id="cohort-sort"><option value="error-rate">Consensus error rate · highest first</option><option value="ba">Balanced accuracy · lowest first</option><option value="fnr">False negative rate · highest first</option><option value="fpr">False positive rate · highest first</option><option value="confident-errors">High-confidence error heuristics · most first</option></select></label>
+                  <label><span>Action</span><select id="cohort-action"><option value="all">All actions</option><option value="rest-start">Rest start</option><option value="postural">Postural</option><option value="kinetic">Kinetic</option><option value="rest-end">Rest end</option></select></label>
+                  <label><span>Consensus classes</span><select id="cohort-classes"><option value="any">Any composition</option><option value="both">Both classes</option><option value="positive">Positive only</option><option value="negative">Negative only</option><option value="none">No binary consensus</option></select></label>
+                  <label><span>Minimum consensus events</span><select id="cohort-min-n"><option value="0">0</option><option value="1" selected>1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8">8</option></select></label>
+                </section>
+                <section class="card cohort-table-card">
+                  <div class="section-heading table-heading"><div><div class="eyebrow">RANKED COHORT</div><h2>Patients <span class="subtle-count" id="cohort-results-count">Loadingâ€¦</span></h2></div><button class="button secondary" id="cohort-reset" type="button">Reset filters</button></div>
+                  <div class="table-scroll"><table class="cohort-table"><thead><tr>
+                    <th><button class="cohort-sort-button" type="button" data-cohort-sort="rank">RANK</button></th>
+                    <th><button class="cohort-sort-button" type="button" data-cohort-sort="patient">PATIENT</button></th>
+                    <th><button class="cohort-sort-button" type="button" data-cohort-sort="consensus">CONSENSUS / EVENTS</button></th>
+                    <th><button class="cohort-sort-button" type="button" data-cohort-sort="class-count">NEG/POS</button></th>
+                    <th><button class="cohort-sort-button" type="button" data-cohort-sort="specificity">SPECIFICITY</button></th>
+                    <th><button class="cohort-sort-button" type="button" data-cohort-sort="recall">RECALL</button></th>
+                    <th><button class="cohort-sort-button" type="button" data-cohort-sort="diagnosis">DIAGNOSIS</button></th>
+                    <th><button class="cohort-sort-button" type="button" data-cohort-sort="age">AGE RANGE</button></th>
+                  </tr></thead><tbody id="cohort-rows"><tr><td colspan="8" class="empty-cell">Patient summaries load when this tab is opened.</td></tr></tbody></table></div>
+                  <p class="chart-footnote">Consensus is shown as binary consensus events / all stored events. NEG / POS are binary consensus class counts. Specificity is true negatives / negatives; recall is true positives / positives. A metric is N/A when its denominator class is absent. Disagreements do not enter these metrics. Diagnosis and age use available shared metadata; conflicts are shown as multiple values.</p>
+                </section>
+              </section>
             </section>
 
             <section id="seed-view" class="view-panel hidden">
-              <div class="kpi-grid" id="seed-kpis"></div>
-              <section class="card seed-overview">
-                <div class="section-heading"><div><div class="eyebrow">SEED COMPARISON</div><h2>Consensus OOF / final-test metrics</h2></div><span class="badge neutral" id="seed-strategy">—</span></div>
-                <div class="table-scroll">
-                  <table><thead><tr><th>SEED</th><th>SPLIT</th><th>BA</th><th>RECALL</th><th>SPECIFICITY</th><th>F1</th><th>ROC-AUC</th><th>N</th></tr></thead><tbody id="seed-summary-rows"></tbody></table>
+              <div class="seed-workspace-tabs">
+                <div id="seed-tabs" class="seed-tabs" role="tablist" aria-label="Training seed"></div>
+                <div class="segmented seed-split-tabs hidden" id="seed-split-tabs" role="tablist" aria-label="Seed split">
+                  <button class="segment active" type="button" data-split="oof" role="tab" aria-selected="true">OOF</button>
+                  <button class="segment" type="button" data-split="test" role="tab" aria-selected="false">Final test</button>
                 </div>
+              </div>
+              <section id="seed-overview-panel" class="card seed-overview">
+                <div class="section-heading"><div><div class="eyebrow">ALL TRAINING SEEDS</div><h2>Stored performance summary</h2></div></div>
+                <div class="table-scroll"><table><thead><tr><th>SEED</th><th>OOF BA</th><th>OOF RECALL</th><th>OOF SPECIFICITY</th><th>OOF N</th><th>TEST BA</th><th>TEST RECALL</th><th>TEST SPECIFICITY</th><th>TEST N</th></tr></thead><tbody id="seed-overview-rows"></tbody></table></div>
+                <p class="chart-footnote">Select a seed tab to inspect its stored OOF events or final-test aggregates. Thresholds and results are read from the run JSON.</p>
               </section>
+              <div class="kpi-grid hidden" id="seed-kpis"></div>
               <section id="oof-detail" class="card chart-card">
                 <div class="section-heading"><div><div class="eyebrow">OUT-OF-FOLD · SELECTED SEED</div><h2>OOF event probabilities</h2></div><span class="threshold-chip compact" id="oof-threshold">Threshold —</span></div>
                 <div class="data-limitation"><b>Metrics use consensus events only (A1 = A2).</b> The plot and table retain A1/A2 disagreements as separate inspection rows; they do not enter consensus metrics. Event identity is unavailable, so points use source array order only and cannot be linked to a patient, action, waveform, or HDF5 row.</div>

@@ -37,28 +37,35 @@ The precomputed Welch spectrum is also retained as a separate gzip-compressed fl
 
 ## 2. Convert each run's results
 
-For the example global LOSO result and the five seed OOF/test outputs:
+The converter automatically detects whether a run root has LOSO results. With one LOSO child, it includes that result and all seed results; with none, it includes only seeds. If several LOSO children exist, specify one with `--loso-run`.
+
+For a run family that has both LOSO predictions and five seed OOF/test outputs:
 
 ```powershell
 micromamba run -n mpy11 python scripts/convert_loso_run.py `
   --run-root "C:\Users\Josue\Documents\liveserver\runs\6ch_pretrain_weak" `
-  --loso-run loso_seed42 `
   --dataset-package "C:\Users\Josue\Documents\parkinson-data\gw4-source" `
-  --output "C:\Users\Josue\Documents\parkinson-data\runs\6ch_pretrain_weak-lososeed42"
+  --output "C:\Users\Josue\Documents\parkinson-data\runs\6ch_pretrain_weak-lososeed42.json"
 ```
 
-This writes only run-specific prediction/metric JSON plus references into the shared dataset. The selected LOSO threshold comes from `loso_metadata.yml`; each seed's OOF and test threshold/metrics come from that seed's `experiment_metrics.yml`. Thresholds are preserved; the converter does not tune them. The output must be a new directory.
+The output is one compact JSON file containing the run metadata, LOSO patient events (when available), stratified summary, seed OOF data, and holdout predictions (when available). It references the shared dataset by `dataset_id`; it does not duplicate dataset signals or patient metadata.
 
-```text
-6ch_pretrain_weak-lososeed42/
-  manifest.json                 run metadata, shared dataset ID, patient/seed index
-  stratified_summary.json       run-wide prediction metrics by action and filename side
-  conversion_report.json        counts and source-artifact limitations
-  patients/<patient-id>.json    global LOSO event predictions, shared metadata ref
-  seed-results/seed_<seed>.json per-seed OOF predictions and final-test metrics
+For a seed-only run family without LOSO results, omit `--loso-run`:
+
+```powershell
+micromamba run -n mpy11 python scripts/convert_loso_run.py `
+  --run-root "C:\Users\Josue\Documents\parkinson-data\windownet-run" `
+  --dataset-package "C:\Users\Josue\Documents\parkinson-data\gw4-source" `
+  --output "C:\Users\Josue\Documents\parkinson-data\runs\windownet-seeds.json"
 ```
 
-Each run package lists the corresponding shared assets under:
+The converter detects `5fold_*` or `seedNN` result directories. It retains stored seed OOF results, event-level holdout predictions when available, and final-test aggregate metrics and thresholds. If newer exports include patient/action/source identifiers, those identities stay attached to OOF and holdout events. Per-epoch intermediate predictions are omitted; stored seed OOF results and best-epoch/selection summaries from `experiment_metrics.yml` are kept. Raw NPZ/YAML, model and pretraining weights, scalers, logs, and source code are not copied. Without LOSO results, the JSON has no global patient ranking or LOSO threshold.
+
+The selected LOSO threshold comes from `loso_metadata.yml`; each seed's OOF and test threshold/metrics come from that seed's `experiment_metrics.yml`. Thresholds are preserved; the converter does not tune them.
+
+The output is a single JSON file. Its `patients` and `seed_results` entries embed their records. The shared dataset remains a separate package referenced by `dataset_assets_prefix`.
+
+Each run JSON references the corresponding shared dataset assets under:
 
 ```text
 datasets/<dataset_id>/manifest.json
@@ -67,7 +74,7 @@ datasets/<dataset_id>/spectra/<spectrum-file>
 datasets/<dataset_id>/patients/<patient-id>.json
 ```
 
-When uploading, place the shared dataset once under `datasets/<dataset_id>/` and each result package under `runs/<run_id>/`. The dashboard resolves signal and metadata refs relative to `dataset_assets_prefix` in each run manifest. Configure access to cover both paths.
+When uploading, place the shared dataset once under `datasets/<dataset_id>/` and each run JSON under `runs/<run_id>.json`. The dashboard resolves signal and metadata refs relative to `dataset_assets_prefix` in the run JSON. Configure access to cover both paths.
 
 The offline run converter also aggregates stored event predictions by action and by filename side. Metrics use the frozen LOSO threshold and only binary consensus labels (`A1 == A2`, label 0 or 1); annotator disagreements and nonbinary consensus labels are counted separately. Recall/FNR and specificity/FPR are N/A when their class is absent, and balanced accuracy is N/A unless both classes occur. Filename suffix `.00` maps to Non-dominant and `.01` to Dominant, following the project convention. An event enters a side group only when all matched candidate filenames are recognized and agree on side; events without candidates, mixed-side candidates, and unrecognized codes stay unassigned. Ambiguous signal identity may still be side-assignable when all candidate filenames agree.
 
@@ -77,11 +84,11 @@ These are prediction-result groups, so they include only actions present in the 
 
 - The global LOSO `predictions.npz` files contain patient, action, labels, probability, and duration, so they can be joined to shared patient metadata and matched to shared signals.
 - Matching uses exact patient/action/A1/A2 fields and source duration at the original GW4 rate of 100 Hz. Ties and source rows proposed for multiple events are marked ambiguous with candidate source details. Missing or out-of-tolerance records stay unmatched. The browser signal itself is the 20 Hz derivative.
-- Seed `oof_predictions.npz` files contain logits, soft targets, and A1/A2 arrays, but no patient ID, action, duration, or event identifier. The converter retains array order and labels the rows as unidentified; it does not link them to HDF5 or patient metadata.
-- Seed `experiment_metrics.yml` files contain aggregate final-test metrics but not all final-test event predictions. The package includes aggregate metrics without inventing event rows.
-- Full per-event OOF/test inspection with patient and waveform links requires future training exports to include stable event identifiers, patient/action/labels, and final-test logits or probabilities.
+- Seed OOF files may or may not contain patient/action/source identifiers. The converter preserves them when present and never infers missing identities.
+- Final-test artifacts may contain only aggregate metrics or may also contain event-level holdout predictions. The converter preserves whichever detail is available.
+- Older seed exports lack patient/action/source identifiers; the newer WindowNet example has them for OOF and holdout events, and the converter retains them. The seed dashboard currently focuses on OOF detail and aggregate final-test metrics.
 - The six-channel HDF5 `X` signals are original GW4 at 100 Hz and remain offline. The shared package serves a filtered 20 Hz derivative plus 100 Hz-derived band-power summaries. The run config's 64 Hz is the model's separate resampled input. Armband signals are 50 Hz but are not present in this HDF5 `X` schema and are not part of this package.
 - Patient metadata codes are preserved as stored. Decode them in the dashboard from the documented codebooks; repeated measurement records remain separate.
 - Non-finite aggregate metric values are represented as the explicit strings `"NaN"`, `"Infinity"`, or `"-Infinity"` in JSON because JSON has no non-finite number type.
 
-The generated dataset and run packages contain research data. Keep them outside Git and private. A public object URL would bypass Access on the HTML page; verify that Access protects the data paths and requests before upload.
+The generated dataset and run JSON files contain patient/event-level data, even after conversion, and must not be committed to GitHub. Store them only in an appropriately protected location. Only aggregate outputs that cannot identify or link to individuals may be committed. A public object URL would bypass Access on the HTML page; verify that Access protects data paths and requests before uploading to Cloudflare.

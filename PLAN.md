@@ -2,7 +2,7 @@
 
 ## Goal
 
-Build and deploy a clean, static, browser-side LOSO inspection dashboard at `parkinson.sai.lat`, with no always-on user machine and no hosted application functions. Keep research data out of GitHub.
+Build and deploy a clean, static, browser-side LOSO inspection dashboard at `parkinson.sai.lat`, with no always-on user machine and no hosted application functions. Keep personal data and credentials out of GitHub; only non-identifying processed aggregates may be stored there under `AGENTS.md`.
 
 ## Phase 1: Inventory and constraints
 
@@ -17,13 +17,13 @@ Build and deploy a clean, static, browser-side LOSO inspection dashboard at `par
 ## Phase 2: Static data format and conversion workflow
 
 1. Compare browser-readable options using measured requirements. Candidate approach: small JSON/Parquet summary tables plus compressed typed-array chunks for signals.
-2. Avoid placing large binary files in the Git repository or bundling the full dataset into the site.
+2. Keep patient/event-level data out of GitHub even after conversion. Only non-identifying processed aggregates may be stored there; keep other converted data in an appropriately protected store.
 3. Define stable identifiers and explicit schema/version metadata; preserve missing values rather than inventing them.
 4. Build a reproducible offline or browser-local conversion process that reads source files and emits static assets. Conversion can use local tooling, but the deployed dashboard must not require Python or a server function.
 5. Validate counts, labels, event matching, units, sampling/time axes, and representative signal values against the unchanged source data.
 6. Split assets for lazy loading and test peak browser memory and transfer size.
 
-**Deliverable:** documented conversion specification, validation report, and local generated assets kept outside Git.
+**Deliverable:** documented conversion specification, validation report, and reproducible processed packages, with personal data stored only in an appropriately protected location.
 
 ## Phase 3: Access and storage design
 

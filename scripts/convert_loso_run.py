@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Convert an experiment's global LOSO and per-seed OOF/test results to static assets.
+"""Convert an experiment's optional global LOSO and per-seed results to one JSON file.
 
 This is an offline converter. It never modifies its source files and never
-copies model weights or scalers. The generated directory is intended for a
-separate private object store, not for Git.
+copies model weights or scalers. The generated file references the separately
+converted shared dataset.
 """
 
 from __future__ import annotations
@@ -13,9 +13,7 @@ import hashlib
 import json
 import math
 import re
-import shutil
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -361,9 +359,12 @@ def _sigmoid(logit: float) -> float:
     return exp_value / (1.0 + exp_value)
 
 
-def _read_seed_results(run_root: Path, strategy: str) -> tuple[list[tuple[Path, dict[str, Any]]], list[dict[str, Any]], float]:
+def _read_seed_results(run_root: Path, strategy: str | None) -> tuple[list[tuple[Path, dict[str, Any]]], list[dict[str, Any]], float]:
     """Package per-seed OOF predictions and stored aggregate final-test metrics."""
-    seed_dirs = sorted(path for path in run_root.glob("5fold_*") if path.is_dir())
+    seed_dirs = sorted(
+        path for path in run_root.iterdir()
+        if path.is_dir() and (path.name.startswith("5fold_") or re.fullmatch(r"seed\d+", path.name))
+    )
     if not seed_dirs:
         raise FileNotFoundError(f"No 5fold seed directories found under {run_root}")
 
@@ -384,12 +385,21 @@ def _read_seed_results(run_root: Path, strategy: str) -> tuple[list[tuple[Path, 
             metrics = yaml.safe_load(stream)
         if not isinstance(config, dict) or "seed" not in config:
             raise ValueError(f"Stored seed missing from {config_path}")
+        seed_strategy = strategy
+        if seed_strategy is None:
+            seed_strategy = config.get("data", {}).get("label_aggregation")
+            available_strategies = metrics.get("cv", {}).get("strategies", {}) if isinstance(metrics, dict) else {}
+            if not isinstance(seed_strategy, str) or seed_strategy not in available_strategies:
+                if len(available_strategies) == 1:
+                    seed_strategy = next(iter(available_strategies))
+                else:
+                    raise ValueError(f"{seed_dir}: cannot determine a unique stored strategy")
         seed = str(config["seed"])
         if seed in seen_seeds:
             raise ValueError(f"More than one selected seed result found for seed {seed}")
         seen_seeds.add(seed)
         try:
-            selected_oof_metrics = metrics["cv"]["strategies"][strategy]["oof"]
+            selected_oof_metrics = metrics["cv"]["strategies"][seed_strategy]["oof"]
             test_metrics = metrics["final_test"]
             model_rate_config = float(config["data"]["sampling_rate"])
             model_rate_metrics = float(metrics["computational_cost"]["sampling_rate_hz"])
@@ -415,6 +425,11 @@ def _read_seed_results(run_root: Path, strategy: str) -> tuple[list[tuple[Path, 
             size = len(data["soft_logits"])
             if any(data[key].ndim != 1 or len(data[key]) != size for key in required_arrays):
                 raise ValueError(f"{predictions_path}: OOF array lengths/shapes do not match")
+            identity_keys = ("soft_patient_id", "soft_action", "soft_filename", "soft_source_hdf_index")
+            for key in identity_keys:
+                if key in data.files and (data[key].ndim != 1 or len(data[key]) != size):
+                    raise ValueError(f"{predictions_path}: identity array {key!r} does not match OOF row count")
+            event_identity_available = all(key in data.files for key in identity_keys)
             event_rows = []
             for index in range(size):
                 logit = _finite(data["soft_logits"][index], f"{predictions_path}: soft_logits[{index}]")
@@ -424,8 +439,7 @@ def _read_seed_results(run_root: Path, strategy: str) -> tuple[list[tuple[Path, 
                 agreement = a1 == a2
                 consensus = agreement and a1 in (0, 1)
                 prediction = int(probability >= oof_threshold)
-                event_rows.append(
-                    {
+                event = {
                         "source_array_index": index,
                         "logit": logit,
                         "probability_from_stored_logit": probability,
@@ -439,34 +453,47 @@ def _read_seed_results(run_root: Path, strategy: str) -> tuple[list[tuple[Path, 
                         "predicted_class_at_stored_oof_threshold": prediction,
                         "correct_on_consensus": (prediction == a1) if consensus else None,
                     }
-                )
+                for source_key, output_key in (("soft_patient_id", "patient_id"), ("soft_action", "action"),
+                                               ("soft_filename", "filename"), ("soft_source_hdf_index", "source_hdf_index")):
+                    if source_key in data.files:
+                        value = data[source_key][index]
+                        event[output_key] = _text(value, source_key) if isinstance(value, (bytes, np.bytes_)) else (value.item() if isinstance(value, np.generic) else value)
+                event_rows.append(event)
+        holdout_rows = _read_holdout_predictions(seed_dir / "holdout_predictions.npz", test_threshold) if (seed_dir / "holdout_predictions.npz").is_file() else None
         seed_record = {
             "seed": seed,
             "seed_directory": seed_dir.name,
-            "strategy": strategy,
+            "strategy": seed_strategy,
             "oof_threshold": oof_threshold,
             "oof_metrics": _json_safe(selected_oof_metrics, f"{seed_dir.name}.oof_metrics"),
             "oof_predictions": {
                 "source_file": predictions_path.name,
-                "event_identity_available": False,
-                "identity_note": "Array index only; patient, action, duration, and HDF5 source identifiers are absent from this NPZ.",
+                "event_identity_available": event_identity_available,
+                "identity_note": (
+                    "Patient, action, source filename, and source HDF5 row are stored for each OOF event."
+                    if event_identity_available
+                    else "Array index only; one or more patient/action/source identifiers are absent from this NPZ."
+                ),
                 "events": event_rows,
             },
             "final_test_threshold": test_threshold,
             "final_test_metrics": _json_safe(test_metrics, f"{seed_dir.name}.final_test"),
-            "final_test_event_predictions_available": False,
+            "final_test_event_predictions_available": holdout_rows is not None,
+            "holdout_predictions": holdout_rows,
         }
         relative = Path("seed-results") / f"seed_{seed}.json"
         outputs.append((relative, seed_record))
         summaries.append(
             {
                 "seed": seed,
-                "strategy": strategy,
+                "strategy": seed_strategy,
                 "data_ref": relative.as_posix(),
                 "oof_event_count": len(event_rows),
+                "oof_event_identity_available": event_identity_available,
                 "oof_threshold": oof_threshold,
                 "final_test_threshold": test_threshold,
-                "final_test_event_predictions_available": False,
+                "final_test_event_predictions_available": holdout_rows is not None,
+                "final_test_event_count": holdout_rows["event_count"] if holdout_rows else None,
             }
         )
     if len(model_rates) != 1:
@@ -474,12 +501,50 @@ def _read_seed_results(run_root: Path, strategy: str) -> tuple[list[tuple[Path, 
     return outputs, summaries, next(iter(model_rates))
 
 
+def _read_holdout_predictions(path: Path, threshold: float) -> dict[str, Any]:
+    """Retain event-level holdout rows when a run exported them."""
+    with np.load(path, allow_pickle=False) as data:
+        required = ("logits", "targets", "a1", "a2")
+        missing = [key for key in required if key not in data.files]
+        if missing:
+            raise ValueError(f"{path}: missing holdout arrays {missing}")
+        size = len(data["logits"])
+        keys = (*required, *(key for key in ("action", "filename", "source_hdf_index", "patient_id") if key in data.files))
+        if any(data[key].ndim != 1 or len(data[key]) != size for key in keys):
+            raise ValueError(f"{path}: holdout array lengths/shapes do not match")
+        rows = []
+        for index in range(size):
+            logit = _finite(data["logits"][index], f"{path}: logits[{index}]")
+            a1, a2 = int(data["a1"][index]), int(data["a2"][index])
+            probability = _sigmoid(logit)
+            row: dict[str, Any] = {
+                "source_array_index": index,
+                "logit": logit,
+                "probability_from_stored_logit": probability,
+                "target_stored": _finite(data["targets"][index], f"{path}: targets[{index}]"),
+                "a1": a1,
+                "a2": a2,
+                "soft_target_from_a1_a2": (a1 + a2) / 2.0,
+                "consensus": a1 == a2,
+                "consensus_label": a1 if a1 == a2 else None,
+                "threshold": threshold,
+                "predicted_class_at_stored_threshold": int(probability >= threshold),
+            }
+            row["correct_on_consensus"] = (row["predicted_class_at_stored_threshold"] == a1) if a1 == a2 else None
+            for key in ("action", "filename", "source_hdf_index", "patient_id"):
+                if key in data.files:
+                    value = data[key][index]
+                    row[key] = _text(value, key) if isinstance(value, (bytes, np.bytes_)) else (value.item() if isinstance(value, np.generic) else value)
+            rows.append(row)
+        return {"source_file": path.name, "event_count": size, "events": rows}
+
+
 def _args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-root", required=True, type=Path, help="Run family directory, e.g. liveserver/runs/6ch_pretrain_weak")
-    parser.add_argument("--loso-run", required=True, help="LOSO child directory, e.g. loso_seed42")
+    parser.add_argument("--loso-run", help="Optional LOSO child directory override; otherwise detected from the run root")
     parser.add_argument("--dataset-package", required=True, type=Path, help="Previously converted shared dataset package")
-    parser.add_argument("--output", required=True, type=Path, help="New output directory outside Git")
+    parser.add_argument("--output", required=True, type=Path, help="New single-file .json output outside Git")
     parser.add_argument("--max-duration-difference-s", type=float, default=0.5)
     parser.add_argument("--tie-tolerance-s", type=float, default=0.01)
     return parser.parse_args()
@@ -488,17 +553,36 @@ def _args() -> argparse.Namespace:
 def main() -> int:
     args = _args()
     run_root = args.run_root.resolve()
-    loso_dir = (run_root / args.loso_run).resolve()
     dataset_package, output = args.dataset_package.resolve(), args.output.resolve()
     if args.max_duration_difference_s < 0 or args.tie_tolerance_s < 0:
         raise ValueError("duration tolerances must be nonnegative")
-    if not loso_dir.is_dir():
-        raise FileNotFoundError(f"LOSO result directory does not exist: {loso_dir}")
+    if not run_root.is_dir():
+        raise FileNotFoundError(f"Run root does not exist: {run_root}")
+    if output.suffix.lower() != ".json":
+        raise ValueError("Run output must be a single .json file")
     if output.exists():
-        raise FileExistsError(f"Output already exists; choose a new output path: {output}")
+        raise FileExistsError(f"Output already exists; choose a new path: {output}")
     for source in (run_root, dataset_package):
         if output == source or output in source.parents or source in output.parents:
             raise ValueError(f"Output must not be inside or overwrite a source path: {source}")
+
+    if args.loso_run:
+        loso_dir = (run_root / args.loso_run).resolve()
+        if not loso_dir.is_dir():
+            raise FileNotFoundError(f"LOSO result directory does not exist: {loso_dir}")
+    else:
+        loso_directories = sorted(path for path in run_root.glob("loso_*") if path.is_dir())
+        candidates = []
+        for path in loso_directories:
+            has_metadata = (path / "loso_metadata.yml").is_file()
+            has_predictions = any(path.glob("patient_*/predictions.npz"))
+            if has_metadata != has_predictions:
+                raise ValueError(f"Incomplete LOSO result folder: {path}; expected both loso_metadata.yml and patient predictions")
+            if has_metadata:
+                candidates.append(path)
+        if len(candidates) > 1:
+            raise ValueError(f"Multiple LOSO results found; choose one with --loso-run: {[path.name for path in candidates]}")
+        loso_dir = candidates[0] if candidates else None
 
     dataset_manifest, signal_rows = _read_dataset_index(dataset_package)
     dataset_id = dataset_manifest["dataset_id"]
@@ -507,143 +591,137 @@ def main() -> int:
     if dataset_source_rate != 100.0 or dataset_signal_rate != 20.0:
         raise ValueError(f"Expected 100 Hz source and 20 Hz display signals, dataset package says {dataset_source_rate} Hz source / {dataset_signal_rate} Hz display")
 
-    metadata_path_yaml = loso_dir / "loso_metadata.yml"
-    if not metadata_path_yaml.is_file():
-        raise FileNotFoundError(f"Missing stored LOSO threshold metadata: {metadata_path_yaml}")
-    with metadata_path_yaml.open("r", encoding="utf-8") as stream:
-        run_metadata = yaml.safe_load(stream)
-    if not isinstance(run_metadata, dict) or "threshold" not in run_metadata:
-        raise ValueError(f"Stored threshold missing from {metadata_path_yaml}")
-    threshold = _finite(run_metadata["threshold"], "stored LOSO threshold")
-    if not 0 <= threshold <= 1:
-        raise ValueError("Stored threshold is outside [0, 1]")
-
-    strategy = run_metadata.get("strategy")
-    if not isinstance(strategy, str) or not strategy:
-        raise ValueError(f"Stored strategy missing from {metadata_path_yaml}")
+    metadata_path_yaml = loso_dir / "loso_metadata.yml" if loso_dir else None
+    threshold = None
+    strategy = None
+    run_metadata: dict[str, Any] = {}
+    if loso_dir:
+        if not metadata_path_yaml.is_file():
+            raise FileNotFoundError(f"Missing stored LOSO threshold metadata: {metadata_path_yaml}")
+        with metadata_path_yaml.open("r", encoding="utf-8") as stream:
+            run_metadata = yaml.safe_load(stream)
+        if not isinstance(run_metadata, dict) or "threshold" not in run_metadata:
+            raise ValueError(f"Stored threshold missing from {metadata_path_yaml}")
+        threshold = _finite(run_metadata["threshold"], "stored LOSO threshold")
+        if not 0 <= threshold <= 1:
+            raise ValueError("Stored threshold is outside [0, 1]")
+        strategy = run_metadata.get("strategy")
+        if not isinstance(strategy, str) or not strategy:
+            raise ValueError(f"Stored strategy missing from {metadata_path_yaml}")
     seed_results, seed_summaries, model_sampling_rate = _read_seed_results(run_root, strategy)
-    patient_files = sorted(loso_dir.glob("patient_*/predictions.npz"))
-    if not patient_files:
-        raise FileNotFoundError(f"No patient_*/predictions.npz files found in {loso_dir}")
+    if loso_dir:
+        patient_files = sorted(loso_dir.glob("patient_*/predictions.npz"))
+        if not patient_files:
+            raise FileNotFoundError(f"No patient_*/predictions.npz files found in {loso_dir}")
+    else:
+        patient_files = []
+        strategy = seed_summaries[0]["strategy"]
 
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = Path(tempfile.mkdtemp(prefix=f".{output.name}.building-", dir=output.parent))
-    try:
-        all_events = 0
-        totals = {"matched": 0, "ambiguous": 0, "unmatched": 0}
-        patient_summaries = []
-        stratified_events = []
-        metadata_counts = dataset_manifest.get("metadata", {}).get("metadata_records_by_patient", {})
-        for npz_path in patient_files:
-            patient_id = npz_path.parent.name.removeprefix("patient_")
-            events = _read_events(npz_path, patient_id, threshold)
-            all_events += len(events)
-            counts = _match_events(
-                events,
-                patient_id,
-                signal_rows,
-                args.max_duration_difference_s,
-                args.tie_tolerance_s,
-            )
-            for key, value in counts.items():
-                totals[key] += value
-            stratified_events.extend(events)
-            relative_patient_path = Path("patients") / f"{patient_id}.json"
-            _json_dump(
-                temp_path / relative_patient_path,
-                {
-                    "patient_id": patient_id,
-                    "shared_metadata_ref": f"patients/{patient_id}.json",
-                    "metadata_match_count": metadata_counts.get(patient_id, 0),
-                    "prediction_source": npz_path.name,
-                    "prediction_sha256": _sha256(npz_path),
-                    "events": events,
-                },
-            )
-            patient_summaries.append(
-                {
-                    "patient_id": patient_id,
-                    "event_count": len(events),
-                    "shared_metadata_ref": f"patients/{patient_id}.json",
-                    "metadata_match_count": metadata_counts.get(patient_id, 0),
-                    "prediction_sha256": _sha256(npz_path),
-                    "data_ref": relative_patient_path.as_posix(),
-                }
-            )
+    all_events = 0
+    totals = {"matched": 0, "ambiguous": 0, "unmatched": 0}
+    patient_records = []
+    stratified_events = []
+    metadata_counts = dataset_manifest.get("metadata", {}).get("metadata_records_by_patient", {})
+    for npz_path in patient_files:
+        patient_id = npz_path.parent.name.removeprefix("patient_")
+        events = _read_events(npz_path, patient_id, threshold)
+        all_events += len(events)
+        counts = _match_events(events, patient_id, signal_rows, args.max_duration_difference_s, args.tie_tolerance_s)
+        for key, value in counts.items():
+            totals[key] += value
+        stratified_events.extend(events)
+        patient_records.append({
+            "patient_id": patient_id,
+            "event_count": len(events),
+            "shared_metadata_ref": f"patients/{patient_id}.json",
+            "metadata_match_count": metadata_counts.get(patient_id, 0),
+            "prediction_sha256": _sha256(npz_path),
+            "data": {
+                "patient_id": patient_id,
+                "shared_metadata_ref": f"patients/{patient_id}.json",
+                "metadata_match_count": metadata_counts.get(patient_id, 0),
+                "prediction_source": npz_path.name,
+                "prediction_sha256": _sha256(npz_path),
+                "events": events,
+            },
+        })
 
-        stratified_summary_ref = "stratified_summary.json"
-        _json_dump(temp_path / stratified_summary_ref, _stratified_summary(stratified_events, threshold))
-        manifest = {
-            "schema_version": SCHEMA_VERSION,
-            "run_id": f"{run_root.name}__{args.loso_run}",
-            "run_family": run_root.name,
-            "loso_run": args.loso_run,
-            "dataset_id": dataset_id,
-            "dataset_manifest_ref": f"datasets/{dataset_id}/manifest.json",
-            "dataset_assets_prefix": f"datasets/{dataset_id}/",
-            "threshold": threshold,
-            "threshold_source": "stored loso_metadata.yml; not optimized by converter",
-            "stratified_summary_ref": stratified_summary_ref,
-            "signal": {
-                "source": "shared GW4 six-channel HDF5 X dataset package",
-                "processing_state": dataset_manifest["signal"]["processing_state"],
-                "sampling_rate_hz": dataset_signal_rate,
-                "source_sampling_rate_hz": dataset_source_rate,
-                "sampling_rate_source": "shared converted browser preview dataset manifest",
-                "model_input_sampling_rate_hz": model_sampling_rate,
-                "model_input_sampling_rate_source": "selected seed run config and experiment metrics",
-                "armband_sampling_rate_hz": 50.0,
-                "armband_note": "Armband signals are not present in the shared six-channel HDF5 X package.",
-                "channels": CHANNELS,
-                "units": UNITS,
-                "dtype": "float32 little-endian",
-                "encoding": "row-major interleaved gzip stream; one file per HDF5 source row",
-            },
-            "matching": {
-                "attributes": ["patient_id", "action", "a1", "a2"],
-                "duration_method": "closest shared dataset sample_count / source rate to prediction duration",
-                "max_duration_difference_s": args.max_duration_difference_s,
-                "tie_tolerance_s": args.tie_tolerance_s,
-                "reused_source_signals": "marked ambiguous; never silently attached to multiple prediction events",
-            },
-            "source": {
-                "loso_metadata_filename": metadata_path_yaml.name,
-                "loso_metadata_sha256": _sha256(metadata_path_yaml),
-            },
-            "counts": {
-                "patients": len(patient_summaries),
-                "prediction_events": all_events,
-                "signals_matched": totals["matched"],
-                "signals_ambiguous": totals["ambiguous"],
-                "signals_unmatched": totals["unmatched"],
-            },
-            "patients": patient_summaries,
-            "seed_results": seed_summaries,
-        }
-        _json_dump(temp_path / "manifest.json", manifest)
-        for relative, value in seed_results:
-            _json_dump(temp_path / relative, value)
-        _json_dump(temp_path / "conversion_report.json", {
-            "run_id": manifest["run_id"],
-            "counts": manifest["counts"],
+    stratified_summary = _stratified_summary(stratified_events, threshold) if stratified_events else None
+    seed_lookup = {relative.as_posix(): value for relative, value in seed_results}
+    for summary in seed_summaries:
+        summary["data"] = seed_lookup.pop(summary.pop("data_ref"))
+    manifest = {
+        "package_format": "parkinson-run-single-json-v1",
+        "schema_version": SCHEMA_VERSION,
+        "run_id": f"{run_root.name}__{loso_dir.name}" if loso_dir else run_root.name,
+        "run_family": run_root.name,
+        "loso_run": loso_dir.name if loso_dir else None,
+        "dataset_id": dataset_id,
+        "dataset_manifest_ref": f"datasets/{dataset_id}/manifest.json",
+        "dataset_assets_prefix": f"datasets/{dataset_id}/",
+        "threshold": threshold,
+        "threshold_source": "stored loso_metadata.yml; not optimized by converter" if loso_dir else None,
+        "stratified_summary": stratified_summary,
+        "signal": {
+            "source": "shared GW4 six-channel HDF5 X dataset package",
+            "processing_state": dataset_manifest["signal"]["processing_state"],
+            "sampling_rate_hz": dataset_signal_rate,
+            "source_sampling_rate_hz": dataset_source_rate,
+            "sampling_rate_source": "shared converted browser preview dataset manifest",
+            "model_input_sampling_rate_hz": model_sampling_rate,
+            "model_input_sampling_rate_source": "selected seed run config and experiment metrics",
+            "armband_sampling_rate_hz": 50.0,
+            "armband_note": "Armband signals are not present in the shared six-channel HDF5 X package.",
+            "channels": CHANNELS,
+            "units": UNITS,
+            "dtype": "float32 little-endian",
+            "encoding": "row-major interleaved gzip stream; one file per HDF5 source row",
+        },
+        "matching": {
+            "attributes": ["patient_id", "action", "a1", "a2"],
+            "duration_method": "closest shared dataset sample_count / source rate to prediction duration",
+            "max_duration_difference_s": args.max_duration_difference_s,
+            "tie_tolerance_s": args.tie_tolerance_s,
+            "reused_source_signals": "marked ambiguous; never silently attached to multiple prediction events",
+        },
+        "source": ({
+            "has_loso_results": True,
+            "loso_metadata_filename": metadata_path_yaml.name,
+            "loso_metadata_sha256": _sha256(metadata_path_yaml),
+        } if metadata_path_yaml else {"has_loso_results": False}),
+        "counts": {
+            "patients": len(patient_records),
+            "prediction_events": all_events,
+            "signals_matched": totals["matched"],
+            "signals_ambiguous": totals["ambiguous"],
+            "signals_unmatched": totals["unmatched"],
+        },
+        "patients": patient_records,
+        "seed_results": seed_summaries,
+        "conversion_report": {
             "seed_result_count": len(seed_summaries),
             "shared_dataset_id": dataset_id,
-            "run_package_bytes_excluding_this_report": sum(path.stat().st_size for path in temp_path.rglob("*") if path.is_file()),
             "notes": [
-                "No dataset signals, patient metadata, model weights, or scaler objects were copied into this run package.",
-                "Events without a valid signal match remain available with an explicit unmatched status.",
-                "Ambiguous candidates retain source row, device, and source filename for researcher review.",
-                "Run-wide stratified action and filename-side metrics are in stratified_summary.json; side assignments require candidate filenames to agree.",
-                "OOF logits/labels have no patient, action, duration, or source-event identifiers in the supplied NPZ; only array-order analysis is possible.",
-                "Seed final-test artifacts contain aggregate metrics, not all event-level predictions.",
+                "This file contains converted run predictions and metrics only; shared dataset assets remain separate.",
+                "No original NPZ/YAML files, model or pretraining weights, scalers, training logs, or source code are included.",
+                "Per-epoch intermediate predictions are omitted; stored seed OOF predictions and best-epoch selection summaries are retained.",
+                "Newer OOF and holdout patient/action/source identifiers are retained when present in the source arrays.",
+                "Events without a valid signal match remain available with an explicit unmatched status; ambiguous candidates remain explicit.",
             ],
-        })
-        temp_path.rename(output)
+        },
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temp_output = output.with_name(f".{output.name}.building")
+    if temp_output.exists():
+        raise FileExistsError(f"Temporary output already exists: {temp_output}")
+    try:
+        _json_dump(temp_output, manifest)
+        temp_output.replace(output)
     except Exception:
-        shutil.rmtree(temp_path, ignore_errors=True)
+        temp_output.unlink(missing_ok=True)
         raise
 
-    print(json.dumps({"output": str(output), **manifest["counts"]}, ensure_ascii=False))
+    print(json.dumps({"output": str(output), "bytes": output.stat().st_size, **manifest["counts"]}, ensure_ascii=False))
     return 0
 
 
