@@ -11,11 +11,22 @@ const state = {
   selectedEventId: null,
   selectedSeed: null,
   selectedSeedTab: "overview",
+  seedOofView: "events",
+  selectedSeedPatient: null,
+  seedTestView: "summary",
+  selectedHoldoutPatient: null,
+  holdoutHeaderSort: null,
+  holdoutHeaderDirection: "desc",
+  holdoutReturnState: null,
+  seedSignalIndexPromise: null,
+  seedPatientMetadata: new Map(),
+  holdoutOpenToken: 0,
   seedRecords: new Map(),
   split: "oof",
   activeView: "global",
   globalTab: "overview",
   cohortRecords: new Map(),
+  patientSignalRecords: new Map(),
   cohortLoaded: false,
   cohortLoading: false,
   cohortToken: 0,
@@ -26,13 +37,19 @@ const state = {
   actionChartToken: 0,
   signalToken: 0,
   signalChannels: null,
+  signalSourceChannels: null,
+  signalElapsedTime: null,
   signalFrequencySummary: null,
   signalSpectrum: null,
+  signalOriginalSpectrum: null,
   datasetArchive: null,
   datasetFiles: new Map(),
   datasetRoot: "",
   uploadedDataset: null,
   uploadedRun: null,
+  uploadedRuns: [],
+  addingRuns: false,
+  currentRunIndex: 0,
   workspaceCached: false,
   cacheDisabledForSession: false,
   datasetUploadName: "dataset.zip",
@@ -58,10 +75,11 @@ function applyTheme(preference) {
   if (state.activeView === "seeds" && state.selectedSeedTab !== "overview") renderSeedView();
   if (state.signalChannels && state.dataset?.signal) {
     const channels = state.signalChannels, rate = state.dataset.signal.sampling_rate_hz;
-    drawTimeSeries($("#acc-canvas"), channels, rate, 0, "m/s²");
-    drawTimeSeries($("#gyr-canvas"), channels, rate, 3, "deg/s");
-    drawPSD($("#acc-psd-canvas"), state.signalSpectrum, 0);
-    drawPSD($("#gyr-psd-canvas"), state.signalSpectrum, 3);
+    drawTimeSeries($("#acc-canvas"), channels, rate, 0, "m/s²", state.signalElapsedTime);
+    drawTimeSeries($("#gyr-canvas"), channels, rate, 3, "deg/s", state.signalElapsedTime);
+    const reference=$("#signal-source-psd")?.checked?state.signalOriginalSpectrum:null;
+    drawPSD($("#acc-psd-canvas"), state.signalSpectrum, 0, reference);
+    drawPSD($("#gyr-psd-canvas"), state.signalSpectrum, 3, reference);
     drawBandPowerBars($("#acc-band-canvas"), state.signalFrequencySummary, 0);
     drawBandPowerBars($("#gyr-band-canvas"), state.signalFrequencySummary, 3);
   }
@@ -178,7 +196,7 @@ async function withWorkspaceStore(mode, action) {
 }
 
 async function saveWorkspaceCopy() {
-  if (!state.datasetArchive || !state.runUploadText) return false;
+  if (!state.datasetArchive || !state.uploadedRuns.length) return false;
   const now = Date.now();
   const saved = {
     id: WORKSPACE_KEY,
@@ -186,6 +204,7 @@ async function saveWorkspaceCopy() {
     datasetBlob: new Blob([state.datasetArchive], { type: "application/zip" }),
     runName: state.runUploadName,
     runText: state.runUploadText,
+    runs: state.uploadedRuns.map((item)=>({name:item.name,text:item.text})),
     savedAt: now,
     expiresAt: now + WORKSPACE_TTL_MS,
   };
@@ -195,15 +214,15 @@ async function saveWorkspaceCopy() {
 }
 
 async function cacheSelectedPair() {
-  if (!state.uploadedDataset || !state.uploadedRun) return;
-  if (state.uploadedRun.dataset_id !== state.uploadedDataset.dataset_id) {
-    $("#upload-status").textContent = "These files do not match. Choose the run made for this dataset.";
+  if (!state.uploadedDataset || !state.uploadedRuns.length) return;
+  if (state.uploadedRuns.some((item)=>item.run.dataset_id !== state.uploadedDataset.dataset_id)) {
+    $("#upload-status").textContent = "At least one run does not match this dataset. Choose runs made for this dataset.";
     return;
   }
   try {
     if (!state.workspaceCached) await saveWorkspaceCopy();
     $("#forget-data-button").disabled = false;
-    $("#upload-status").textContent = `Pair saved in this browser until ${new Date(Date.now() + WORKSPACE_TTL_MS).toLocaleString()}.`;
+    $("#upload-status").textContent = `Dataset and ${state.uploadedRuns.length} run${state.uploadedRuns.length===1?"":"s"} saved in this browser until ${new Date(Date.now() + WORKSPACE_TTL_MS).toLocaleString()}.`;
   } catch (error) {
     $("#upload-status").textContent = `Files are ready, but this browser could not save a refresh copy: ${error.message || error}`;
   }
@@ -232,7 +251,7 @@ async function restoreWorkspaceCopy() {
     state.runUploadName = saved.runName || "run.json";
     state.runUploadText = saved.runText;
     await loadDatasetUpload(saved.datasetBlob);
-    await loadRunUpload({ text: async () => saved.runText });
+    await loadRunUpload(saved.runs?.length?saved.runs:[{name:state.runUploadName,text:saved.runText}]);
     $("#dataset-file-name").textContent = state.datasetUploadName;
     $("#run-file-name").textContent = state.runUploadName;
     $("#upload-status").textContent = `Restored local copy · expires ${new Date(saved.expiresAt).toLocaleString()}`;
@@ -255,11 +274,15 @@ async function runRecord(item) {
 }
 
 async function fetchGzipArrayBuffer(url) {
-  if (state.datasetArchive) return (await readDatasetFile(url)).slice().buffer;
-  const response = await fetch(url, {cache:"force-cache"});
-  if (!response.ok) throw new Error(`Asset request failed (${response.status})`);
+  let compressed;
+  if (state.datasetArchive) compressed=await readDatasetFile(url);
+  else {
+    const response = await fetch(url, {cache:"force-cache"});
+    if (!response.ok) throw new Error(`Asset request failed (${response.status})`);
+    compressed=new Uint8Array(await response.arrayBuffer());
+  }
   if (!("DecompressionStream" in window)) throw new Error("This browser does not support gzip stream decompression.");
-  const stream = new Blob([await response.arrayBuffer()]).stream().pipeThrough(new DecompressionStream("gzip"));
+  const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream("gzip"));
   return new Response(stream).arrayBuffer();
 }
 
@@ -297,33 +320,53 @@ async function loadDatasetUpload(file) {
   }
 }
 
-async function loadRunUpload(file) {
+async function loadRunUpload(file, {append = false} = {}) {
   if (!file) return;
-  const sourceText = await file.text();
-  const run = JSON.parse(sourceText);
-  if (!run.dataset_id || !Array.isArray(run.patients) || !Array.isArray(run.seed_results)) {
-    throw new Error("This is not a supported single-file run JSON. Choose the converted run JSON file.");
+  const files=Array.isArray(file)?file:[file];
+  const uploads=[];
+  for(const item of files) {
+    const sourceText=typeof item.text==="function"?await item.text():item.text;
+    const run=JSON.parse(sourceText);
+    if (!run.dataset_id || !Array.isArray(run.patients) || !Array.isArray(run.seed_results)) {
+      throw new Error(`${item.name||"A selected file"} is not a supported converted run JSON.`);
+    }
+    uploads.push({name:item.name||"run.json",text:sourceText,run});
   }
-  state.uploadedRun = run;
-  state.runUploadText = sourceText;
-  state.runUploadName = file.name || state.runUploadName;
+  if(!uploads.length)throw new Error("Choose at least one converted run JSON file.");
+  const previous=append?state.uploadedRuns:[];
+  const datasetIds=new Set([...previous,...uploads].map((item)=>item.run.dataset_id));
+  if(datasetIds.size!==1)throw new Error("All selected run files must use the same dataset.");
+  const additions=append?uploads.filter((item)=>!previous.some((existing)=>existing.name===item.name&&existing.text===item.text)):uploads;
+  if(append&&!additions.length)throw new Error("Those run files are already loaded.");
+  state.uploadedRuns=[...previous,...additions];
+  state.uploadedRun=state.uploadedRuns[0].run;
+  state.runUploadText=state.uploadedRuns[0].text;
+  state.runUploadName=state.uploadedRuns.map((item)=>item.name).join(", ");
+  return previous.length;
+}
+
+function renderRunSelector(selectedIndex = 0) {
+  state.catalog = { runs: state.uploadedRuns.map((item)=>({label:`${item.run.run_family||item.run.run_id||"Run"} · ${item.name}`})), seedCount:state.uploadedRuns.reduce((total,item)=>total+item.run.seed_results.length,0) };
+  const selector=$("#run-select");
+  selector.innerHTML=state.catalog.runs.map((run,index)=>`<option value="${index}">${escapeHTML(run.label)}</option>`).join("")+`<option value="__add_run__">＋ Add run file…</option>`;
+  selector.disabled=false;
+  selector.value=String(selectedIndex);
 }
 
 async function openUploadedWorkspace({ remember = true } = {}) {
   $("#error-state").classList.add("hidden");
   try {
-    if (!state.uploadedDataset || !state.uploadedRun) throw new Error("Select both the dataset ZIP and run JSON.");
-    if (state.uploadedRun.dataset_id !== state.uploadedDataset.dataset_id) {
-      throw new Error(`Dataset mismatch: this run expects ${state.uploadedRun.dataset_id}, but the ZIP contains ${state.uploadedDataset.dataset_id}.`);
+    if (!state.uploadedDataset || !state.uploadedRuns.length) throw new Error("Select the dataset ZIP and at least one run JSON.");
+    const mismatched=state.uploadedRuns.find((item)=>item.run.dataset_id!==state.uploadedDataset.dataset_id);
+    if (mismatched) {
+      throw new Error(`Dataset mismatch: ${mismatched.name} expects ${mismatched.run.dataset_id}, but the ZIP contains ${state.uploadedDataset.dataset_id}.`);
     }
     if (remember && !state.workspaceCached && !state.cacheDisabledForSession) {
       try { await saveWorkspaceCopy(); } catch (error) { console.warn("Could not cache the workspace in this browser:", error); }
     }
     state.dataset = state.uploadedDataset;
-    state.catalog = { runs: [{ label: state.uploadedRun.run_family || state.uploadedRun.run_id || "Uploaded run" }], seedCount: state.uploadedRun.seed_results.length };
+    renderRunSelector(0);
     $("#dataset-status").textContent = `${state.dataset.counts?.signals ?? "—"} source records · ${(state.dataset.dataset_id || "").slice(0, 10)}`;
-    $("#run-select").innerHTML = `<option>${escapeHTML(state.catalog.runs[0].label)}</option>`;
-    $("#run-select").disabled = true;
     $("#global-count").textContent = "LOSO";
     $("#seed-count").textContent = String(state.catalog.seedCount || "—");
     $("#loading-state").classList.add("hidden");
@@ -335,19 +378,42 @@ async function openUploadedWorkspace({ remember = true } = {}) {
 }
 
 async function selectRun(index) {
+  closeHoldoutPatient();
+  state.holdoutHeaderSort=null;
+  state.holdoutHeaderDirection="desc";
   state.runChoice = state.catalog.runs[index];
   state.runBase = new URL(".", location.href);
-  state.run = state.uploadedRun;
+  const uploaded=state.uploadedRuns[index];
+  if(!uploaded)throw new Error("The selected run is not loaded.");
+  state.currentRunIndex=index;
+  $("#run-select").value=String(index);
+  state.run=uploaded.run;
+  state.uploadedRun=uploaded.run;
+  state.runUploadText=uploaded.text;
+  state.runUploadName=uploaded.name;
+  state.seedSignalIndexPromise = null;
+  state.seedPatientMetadata.clear();
   if (state.run.dataset_id !== state.dataset.dataset_id) {
     throw new Error(`Run expects dataset ${state.run.dataset_id}, but catalog loaded ${state.dataset.dataset_id}.`);
   }
+  const hasLoso=Array.isArray(state.run.patients)&&state.run.patients.length>0;
+  state.activeView=hasLoso?"global":"seeds";
+  state.globalTab="overview";
+  state.selectedSeedTab="overview";
+  $("#global-nav-item").classList.toggle("hidden",!hasLoso);
+  document.querySelectorAll(".nav-item").forEach((button)=>{const active=button.dataset.view===state.activeView;button.classList.toggle("active",active);button.setAttribute("aria-selected",String(active));});
+  $("#global-view").classList.toggle("hidden",!hasLoso);
+  $("#seed-view").classList.toggle("hidden",hasLoso);
+  $("#global-controls").classList.add("hidden");
   state.stratifiedSummary = state.run.stratified_summary || null;
   $("#threshold-chip b").textContent = fmt(state.run.threshold, 3);
   $("#seed-count").textContent = String(state.run.seed_results?.length ?? 0);
-  populatePatients();
+  if(hasLoso)populatePatients();
+  else{state.patient=null;state.patientData=null;$("#patient-select").replaceChildren(new Option("No LOSO patient data",""));$("#patient-select").disabled=true;}
   state.seedRecords.clear();
   state.patientData = null;
   state.cohortRecords.clear();
+  state.patientSignalRecords.clear();
   state.cohortLoaded = false;
   state.cohortLoading = false;
   state.cohortToken++;
@@ -359,8 +425,10 @@ async function selectRun(index) {
   $("#global-controls").classList.toggle("hidden", state.activeView !== "global" || state.globalTab !== "subject");
   renderGlobalKpis();
   renderStratifiedSummary();
-  if (state.patient) await selectPatient(state.patient);
-  if (state.globalTab === "overview" && state.activeView === "global") await loadActionBoxplotData();
+  if (hasLoso&&state.patient) await selectPatient(state.patient);
+  if (state.globalTab === "overview" && state.activeView === "global") {
+    await Promise.all([loadActionBoxplotData(),renderLosoPerformanceSummary()]);
+  }
   if (state.globalTab === "cohort" && state.activeView === "global") await loadCohortRecords();
   if (state.activeView === "seeds") await prepareSeeds();
 }
@@ -404,9 +472,83 @@ async function selectPatient(patientId) {
     const metadataRecord = await readDatasetJSON(record.shared_metadata_ref);
     record.metadata_records = metadataRecord.metadata_records || [];
   }
+  const sourceSignals=await sourceSignalsForPatient(patientId);
+  record.source_transition_events=transitionSignalEvents(sourceSignals,record.events||[]);
   state.patientData = record;
   renderPatient();
   updateGlobalHeading();
+}
+
+async function sourceSignalsForPatient(patientId) {
+  const id=String(patientId);
+  let sourceSignals=state.patientSignalRecords.get(id);
+  if(!sourceSignals){
+    const pattern=state.dataset.patient_signals_ref_pattern;
+    if(pattern){
+      const ref=pattern.replace("<patient-id>",encodeURIComponent(id));
+      try{sourceSignals=(await readDatasetJSON(ref)).signals||[];}
+      catch(error){
+        const message=String(error.message||error);
+        if(!message.includes("404")&&!message.includes("Dataset archive is missing"))throw error;
+      }
+    }
+    if(!sourceSignals){
+      const index=await readDatasetJSON(state.dataset.signals_index_ref);
+      sourceSignals=(index.signals||[]).filter((row)=>String(row.patient_id)===id);
+    }
+    state.patientSignalRecords.set(id,sourceSignals);
+  }
+  return sourceSignals.filter((row)=>String(row.patient_id)===id);
+}
+
+function transitionSignalEvents(sourceSignals,predictionEvents) {
+  const isWatch4=(row)=>{
+    const device=String(row?.device||"").toLowerCase().replace(/[^a-z0-9]/g,"");
+    return device==="smartwatch"||device==="galaxywatch4"||device==="gw4";
+  };
+  const normalizeAction=(action)=>String(action||"").trim().toLowerCase().replace(/[ _]+/g,"-");
+  const predictionSources=predictionEvents.flatMap((event)=>{
+    const candidates=(event.signal_match?.candidates||[]).filter(isWatch4);
+    if(candidates.length!==1)return [];
+    const source=candidates[0];
+    if(!source.source_file||!Number.isFinite(source.start_elapsed_time_s)||!Number.isFinite(source.end_elapsed_time_s))return [];
+    return [{event,source}];
+  });
+  return sourceSignals
+    .filter((row)=>String(row.action).trim().toLowerCase()==="transition"&&isWatch4(row))
+    .filter((row)=>{
+      if(!row.source_file||!Number.isFinite(row.start_elapsed_time_s)||!Number.isFinite(row.end_elapsed_time_s))return false;
+      const adjacent=predictionSources.filter(({source})=>source.source_file===row.source_file);
+      const previous=adjacent
+        .filter(({source})=>source.end_elapsed_time_s<=row.start_elapsed_time_s+1)
+        .sort((a,b)=>b.source.end_elapsed_time_s-a.source.end_elapsed_time_s)[0];
+      const following=adjacent
+        .filter(({source})=>source.start_elapsed_time_s>=row.end_elapsed_time_s-1)
+        .sort((a,b)=>a.source.start_elapsed_time_s-b.source.start_elapsed_time_s)[0];
+      const nextEpoch=normalizeAction(row.next_epoch);
+      const followingMatches=normalizeAction(following?.event.action)===nextEpoch
+        ||normalizeAction(following?.source.previous_epoch)===nextEpoch;
+      return Boolean(previous&&following
+        &&normalizeAction(previous.event.action)===normalizeAction(row.previous_epoch)
+        &&followingMatches);
+    })
+    .map((row)=>({
+      event_id:`transition-${row.source_h5_index}`,
+      action:row.action,
+      source_h5_index:row.source_h5_index,
+      device:row.device,
+      source_filename:row.source_filename,
+      source_file:row.source_file,
+      previous_epoch:row.previous_epoch,
+      next_epoch:row.next_epoch,
+      nearest_transition_index:row.nearest_transition_index,
+      start_elapsed_time_s:row.start_elapsed_time_s,
+      end_elapsed_time_s:row.end_elapsed_time_s,
+      start_timestamp_us:row.start_timestamp_us,
+      end_timestamp_us:row.end_timestamp_us,
+      transition_source:true,
+      signal_match:{status:"matched",candidates:[row]},
+    }));
 }
 
 function metaValue(row, key) {
@@ -502,6 +644,35 @@ function renderGlobalKpis() {
     kpiCard("STORED THRESHOLD", fmt(state.run?.threshold, 3), "Read from the selected run", "⊘"),
     kpiCard("SIGNAL MATCHES", signals, `${count.signals_ambiguous || 0} ambiguous · ${count.signals_unmatched || 0} unmatched`, "⌁"),
   ].join("");
+}
+
+function renderLosoPerformanceSummary() {
+  const summary=state.run?.stratified_summary;
+  const groups=summary?.by_action;
+  const panel=$("#loso-performance-summary");
+  if(!Array.isArray(groups)||!groups.length){panel.classList.add("hidden");return;}
+  panel.classList.remove("hidden");
+  const total=(key)=>groups.reduce((sum,row)=>sum+(Number.isFinite(row[key])?row[key]:0),0);
+  const tp=total("tp"),tn=total("tn"),fp=total("fp"),fn=total("fn");
+  const positives=tp+fn,negatives=tn+fp;
+  const recall=positives?tp/positives:null;
+  const specificity=negatives?tn/negatives:null;
+  const balancedAccuracy=recall!==null&&specificity!==null?(recall+specificity)/2:null;
+  const precision=tp+fp?tp/(tp+fp):null;
+  const f1=2*tp+fp+fn?2*tp/(2*tp+fp+fn):null;
+  const events=total("event_count"),consensus=total("consensus_count");
+  const excluded=total("disagreement_count")+total("nonbinary_consensus_count");
+  const cards=[
+    kpiCard("POOLED LOSO BA",balancedAccuracy===null?"N/A":fmtPct(balancedAccuracy),"All binary consensus predictions"),
+    kpiCard("RECALL",recall===null?"N/A":fmtPct(recall),`${tp} / ${positives} positive consensus events`),
+    kpiCard("SPECIFICITY",specificity===null?"N/A":fmtPct(specificity),`${tn} / ${negatives} negative consensus events`),
+    kpiCard("PRECISION",precision===null?"N/A":fmtPct(precision),"Pooled event-level predictions"),
+    kpiCard("F1",f1===null?"N/A":fmtPct(f1),"Pooled event-level predictions"),
+    kpiCard("ALL INPUT EVENTS",String(events),`${consensus} binary consensus scored · ${excluded} excluded`),
+  ];
+  $("#loso-performance-kpis").innerHTML=cards.join("");
+  $("#loso-performance-threshold").textContent=`Stored LOSO threshold ${fmt(summary.threshold,3)}`;
+  $("#loso-performance-note").textContent="Confusion counts are pooled across all held-out patients and actions, not averaged per patient. Only binary consensus events (A1 = A2 in {0, 1}) contribute to performance metrics; disagreements and nonbinary consensus events are excluded.";
 }
 
 function renderPatient() {
@@ -731,6 +902,31 @@ function cohortMetadataValue(record, key) {
   return unique.length === 1 ? unique[0] : "Multiple values";
 }
 
+function ensureSeedPatientMetadata(patientIds,split,record) {
+  const pending=[];
+  for(const id of patientIds) {
+    const key=String(id);
+    if(!state.seedPatientMetadata.has(key)) {
+      const entry={loaded:false,records:[]};
+      entry.promise=readDatasetJSON(`patients/${key}.json`).then((data)=>{entry.records=data.metadata_records||[];}).catch(()=>{entry.records=[];}).finally(()=>{entry.loaded=true;});
+      state.seedPatientMetadata.set(key,entry);
+    }
+    const entry=state.seedPatientMetadata.get(key);
+    if(!entry.loaded)pending.push(entry.promise);
+  }
+  if(!pending.length)return;
+  Promise.all(pending).then(()=>{
+    if(state.activeView!=="seeds"||String(state.selectedSeed)!==String(record.seed))return;
+    if(split==="oof"&&state.selectedSeedTab===String(record.seed))renderSeedPatientAnalysis(record,true);
+    else if(split==="test"&&state.selectedSeedTab===String(record.seed)&&state.seedTestView==="patients")renderHoldoutPatientAnalysis(record,true);
+  });
+}
+
+function seedPatientMetadataValue(patientId,key) {
+  const entry=state.seedPatientMetadata.get(String(patientId));
+  return !entry||!entry.loaded?"Loading…":cohortMetadataValue({metadata_records:entry.records},key);
+}
+
 function renderCohort() {
   if (!state.cohortLoaded) return;
   const metric = $("#cohort-sort").value;
@@ -843,18 +1039,48 @@ function updateGlobalHeading() {
 }
 
 function filteredEvents() {
-  const events = state.patientData?.events || [];
+  const events = [...(state.patientData?.events || []), ...(state.patientData?.source_transition_events || [])];
   const action = $("#action-filter").value;
   const category = $("#event-filter").value;
   const search = $("#event-search").value.trim().toLowerCase();
   return events.filter((event) => {
     if (action !== "all" && event.action !== action) return false;
+    if (event.transition_source) {
+      if (category !== "all") return false;
+      if (search && !`${event.action} ${event.previous_epoch || ""} ${event.next_epoch || ""} ${event.source_h5_index} ${event.source_filename || ""}`.toLowerCase().includes(search)) return false;
+      return true;
+    }
     if (category === "consensus" && !event.consensus) return false;
     if (category === "disagreement" && event.a1 === event.a2) return false;
     if (category === "errors" && !(event.consensus && event.correct_on_consensus === false)) return false;
     if (search && !`${event.action} ${event.event_id} ${event.a1} ${event.a2}`.toLowerCase().includes(search)) return false;
     return true;
   });
+}
+
+function orderEventsBySourceTime(events) {
+  const sourceRow=(event)=>event.transition_source?event:(event.signal_match?.status==="matched"&&event.signal_match.candidates?.length===1?event.signal_match.candidates[0]:null);
+  const sideOrder={"Dominant":0,"Non-dominant":1,"Mixed candidates":2,"Unknown":3};
+  const timed=events.map((event,index)=>({event,index,source:sourceRow(event),side:eventSide(event)}));
+  timed.sort((left,right)=>{
+    const sideDifference=(sideOrder[left.side]??3)-(sideOrder[right.side]??3);
+    if(sideDifference)return sideDifference;
+    const a=left.source,b=right.source;
+    if(!a||!b)return !a&&!b?left.index-right.index:!a?1:-1;
+    const aFile=String(a.source_file||""),bFile=String(b.source_file||"");
+    if(aFile!==bFile&&(aFile||bFile))return aFile.localeCompare(bFile,undefined,{numeric:true})||left.index-right.index;
+    if(Number.isFinite(a.start_elapsed_time_s)&&Number.isFinite(b.start_elapsed_time_s)){
+      const elapsedOrder=a.start_elapsed_time_s-b.start_elapsed_time_s;
+      if(elapsedOrder)return elapsedOrder;
+    }
+    if(Number.isFinite(a.start_timestamp_us)&&Number.isFinite(b.start_timestamp_us)){
+      const timestampOrder=a.start_timestamp_us-b.start_timestamp_us;
+      if(timestampOrder)return timestampOrder;
+    }
+    const elapsedOrder=(Number(a.start_elapsed_time_s)||0)-(Number(b.start_elapsed_time_s)||0);
+    return elapsedOrder||left.index-right.index;
+  });
+  return timed.map((item)=>item.event);
 }
 
 function eventStatus(event) {
@@ -878,7 +1104,18 @@ function eventSide(event) {
   const sides = [...new Set((event.signal_match?.candidates || []).map((candidate) => filenameSide(candidate.source_filename)).filter(Boolean))];
   if (sides.length === 1) return sides[0];
   if (sides.length > 1) return "Mixed candidates";
-  return "Unknown";
+  return filenameSide(event.filename) || "Unknown";
+}
+
+function eventMoment(event) {
+  const filenames=(event.signal_match?.candidates||[]).map((candidate)=>candidate.source_filename);
+  if(!filenames.length)filenames.push(event.source_filename,event.filename);
+  const moments=[...new Set(filenames.map((filename)=>String(filename||"").match(/(?:^|_)(M[A-Z])(?:_|$)/)?.[1]).filter(Boolean))];
+  return moments.length===1?moments[0]:moments.length>1?"Multiple":"Unknown";
+}
+
+function activePatientThreshold() {
+  return state.patientData?.analysis_threshold ?? state.run?.threshold;
 }
 
 function renderGlobalEvents() {
@@ -886,7 +1123,7 @@ function renderGlobalEvents() {
   const summary = metricSummary(events);
   $("#event-count").textContent = `${filteredEvents().length} / ${events.length}`;
   const n = events.length;
-  const threshold = state.run.threshold;
+  const threshold = activePatientThreshold();
   const data = events.map((event) => {
     const [status] = eventStatus(event);
     return { probability: event.probability, label: event.a1 === event.a2 ? Number(event.a1) : null, disagreement: event.a1 !== event.a2, predicted: event.predicted_class, id: event.event_id, status };
@@ -935,7 +1172,7 @@ function renderProbabilityPlot() {
     $("#probability-plot").innerHTML = `<div class="empty-inline">No events are stored for this patient.</div>`;
     return;
   }
-  $("#probability-plot").innerHTML = makeProbabilitySvg(events, state.run.threshold, state.selectedEventId, (event) => {
+  $("#probability-plot").innerHTML = makeProbabilitySvg(events, activePatientThreshold(), state.selectedEventId, (event) => {
     const [status] = eventStatus(event);
     return {id:event.event_id,xLabel:event.event_id,probability:event.probability,disagreement:event.a1 !== event.a2,status};
   });
@@ -943,18 +1180,28 @@ function renderProbabilityPlot() {
 }
 
 function renderEventTable() {
-  const rows = filteredEvents();
-  $("#event-count").textContent = `${rows.length} / ${state.patientData?.events?.length || 0}`;
+  const rows = orderEventsBySourceTime(filteredEvents());
+  const predictionCount = state.patientData?.events?.length || 0;
+  const transitionCount = state.patientData?.source_transition_events?.length || 0;
+  $("#event-count").textContent = `${rows.length} shown · ${predictionCount} predictions · ${transitionCount} transitions`;
   if (!rows.length) {
-    $("#event-rows").innerHTML = `<tr><td colspan="7" class="empty-cell">No events match these filters.</td></tr>`;
+    $("#event-rows").innerHTML = `<tr><td colspan="9" class="empty-cell">No events match these filters.</td></tr>`;
     return;
   }
   $("#event-rows").innerHTML = rows.map((event) => {
+    if (event.transition_source) {
+      const context=[event.previous_epoch,event.next_epoch].filter(Boolean).map(actionName).join(" \u2192 ");
+      const start=Number.isFinite(event.start_elapsed_time_s)?`${fmt(event.start_elapsed_time_s,2)} s`:"unknown";
+      const end=Number.isFinite(event.end_elapsed_time_s)?`${fmt(event.end_elapsed_time_s,2)} s`:"unknown";
+      return `<tr data-event-id="${escapeHTML(event.event_id)}" class="${event.event_id === state.selectedEventId ? "selected-row" : ""}">
+      <td class="event-id">HDF5 row ${escapeHTML(event.source_h5_index)}</td><td>${escapeHTML(actionName(event.action))}${context?`<br><small>Between ${escapeHTML(context)}</small>`:""}</td><td>${escapeHTML(actionName(event.device))} · ${escapeHTML(filenameSide(event.source_filename) || "Unknown")}<br><small>${start}-${end}</small></td><td>${escapeHTML(eventMoment(event))}</td><td>&mdash;</td>
+      <td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td><span class="badge neutral">Source signal: no prediction</span></td></tr>`;
+    }
     const [status, tone] = eventStatus(event);
     const soft = event.soft_target_stored;
     const model = Number(event.predicted_class) === 1 ? "Tremor" : "No tremor";
     return `<tr data-event-id="${escapeHTML(event.event_id)}" class="${event.event_id === state.selectedEventId ? "selected-row" : ""}">
-      <td class="event-id">${escapeHTML(event.event_id)}</td><td>${escapeHTML(actionName(event.action))}</td><td>${escapeHTML(eventSide(event))}</td><td class="label-pair">${escapeHTML(event.a1)} / ${escapeHTML(event.a2)}</td>
+      <td class="event-id">${escapeHTML(event.event_id)}</td><td>${escapeHTML(actionName(event.action))}</td><td>${escapeHTML(eventSide(event))}</td><td>${escapeHTML(eventMoment(event))}</td><td class="label-pair">${escapeHTML(event.a1)} / ${escapeHTML(event.a2)}</td>
       <td>${fmt(soft, 2)}</td><td class="probability-cell">${fmt(event.probability, 3)}</td><td>${model}</td><td><span class="badge ${tone}">${escapeHTML(status)}</span></td></tr>`;
   }).join("");
   $("#event-rows").querySelectorAll("tr[data-event-id]").forEach((row) => row.addEventListener("click", () => selectEvent(row.dataset.eventId)));
@@ -962,7 +1209,7 @@ function renderEventTable() {
 
 async function selectEvent(eventId) {
   state.selectedEventId = eventId;
-  const event = state.patientData?.events.find((item) => item.event_id === eventId);
+  const event = [...(state.patientData?.events || []), ...(state.patientData?.source_transition_events || [])].find((item) => item.event_id === eventId);
   renderProbabilityPlot();
   renderEventTable();
   await renderSelectedEvent(event);
@@ -971,7 +1218,7 @@ async function selectEvent(eventId) {
 async function renderSelectedEvent(event) {
   const token = ++state.signalToken;
   if (!event) return;
-  $("#signal-title").textContent = `${actionName(event.action)} · event ${event.source_npz_index}`;
+  $("#signal-title").textContent = `${actionName(event.action)} · event ${event.source_npz_index ?? event.event_id}`;
   const match = event.signal_match || {status:"unmatched",candidates:[]};
   const select = $("#signal-source-select");
   select.replaceChildren();
@@ -998,26 +1245,35 @@ async function renderSelectedEvent(event) {
     }
     const candidate = match.candidates[Number(index)];
     const base = state.datasetBase;
-    $("#signal-provenance").textContent = `Laterality: ${filenameSide(candidate.source_filename) || "unknown"} · ${ambiguous ? "Researcher-selected candidate; match remains ambiguous" : "Unique closest-duration match"} · HDF5 row ${candidate.source_h5_index} · ${candidate.source_filename || "source filename not recorded"} · ${candidate.device || "device not recorded"} · ${candidate.sample_count} samples · ${fmt(state.dataset.signal.sampling_rate_hz, 1)} Hz filtered preview from ${fmt(state.dataset.signal.source_sampling_rate_hz, 1)} Hz source`;
+    const matchDescription=candidate.match_method|| (ambiguous ? "Researcher-selected candidate; match remains ambiguous" : "Unique closest-duration match");
+    const sourceLabels=!event.transition_source&&Number.isFinite(Number(candidate.dataset_a1))&&Number.isFinite(Number(candidate.dataset_a2))
+      ? `Dataset annotations A1/A2: ${candidate.dataset_a1}/${candidate.dataset_a2}${Number(candidate.dataset_a1)!==Number(event.a1)||Number(candidate.dataset_a2)!==Number(event.a2)?` (run annotations: ${event.a1}/${event.a2})`:""}`
+      : "Dataset annotations unavailable";
+    const between=[event.previous_epoch,event.next_epoch].filter(Boolean).map(actionName).join(" \u2192 ");
+    const elapsed=Number.isFinite(event.start_elapsed_time_s)&&Number.isFinite(event.end_elapsed_time_s)?`recording time ${fmt(event.start_elapsed_time_s,2)}-${fmt(event.end_elapsed_time_s,2)} s`:"recording time unavailable";
+    const transitionNote=event.transition_source?`Transition source segment${between?` between ${between}`:""}; ${elapsed}. No prediction labels or probabilities are assigned. `:"";
+    $("#signal-provenance").textContent = `${transitionNote}Laterality: ${filenameSide(candidate.source_filename) || "unknown"} · ${matchDescription} · ${sourceLabels} · HDF5 row ${candidate.source_h5_index} · ${candidate.source_filename || "source filename not recorded"} · ${candidate.device || "device not recorded"} · ${candidate.sample_count} samples at ${fmt(state.dataset.signal.sampling_rate_hz, 1)} Hz source rate`;
     $("#signal-empty").textContent = "Loading selected signal…";
     $("#signal-empty").classList.remove("hidden");
     try {
-      const [raw, spectrumRaw] = await Promise.all([
+      const [raw, spectrumRaw, elapsedRaw] = await Promise.all([
         fetchGzipArrayBuffer(candidate.signal_ref),
         fetchGzipArrayBuffer(candidate.spectrum_ref),
+        candidate.elapsed_time_ref ? fetchGzipArrayBuffer(candidate.elapsed_time_ref) : Promise.resolve(null),
       ]);
       const channels = decodeFloatChannels(raw, candidate.sample_count);
+      const elapsedTime = elapsedRaw ? decodeElapsedTimes(elapsedRaw, candidate.elapsed_time_sample_count) : null;
       const spectrum = decodeSpectrum(spectrumRaw, candidate.spectrum_frequency_count, candidate.spectrum_nperseg, state.dataset.signal.source_sampling_rate_hz);
       if (token !== state.signalToken) return;
-      state.signalChannels = channels;
+      state.signalSourceChannels = channels;
+      state.signalElapsedTime = elapsedTime;
       state.signalFrequencySummary = candidate.frequency_summary;
-      state.signalSpectrum = spectrum;
-      drawTimeSeries($("#acc-canvas"), channels, state.dataset.signal.sampling_rate_hz, 0, "m/s²");
-      drawTimeSeries($("#gyr-canvas"), channels, state.dataset.signal.sampling_rate_hz, 3, "deg/s");
-      drawPSD($("#acc-psd-canvas"), state.signalSpectrum, 0);
-      drawPSD($("#gyr-psd-canvas"), state.signalSpectrum, 3);
+      state.signalOriginalSpectrum = spectrum;
+      updateSignalFilterControls();
+      applySignalFilter();
       drawBandPowerBars($("#acc-band-canvas"), state.signalFrequencySummary, 0);
       drawBandPowerBars($("#gyr-band-canvas"), state.signalFrequencySummary, 3);
+      $("#psd-rate-note").textContent=`Selected signal sampled at ${fmt(state.dataset.signal.sampling_rate_hz, 1)} Hz`;
       $("#signal-empty").classList.add("hidden");
     } catch (error) {
       if (token !== state.signalToken) return;
@@ -1025,9 +1281,11 @@ async function renderSelectedEvent(event) {
     }
   };
   select.onchange = () => loadCandidate(select.value);
-  if (!ambiguous && match.candidates.length === 1) {
-    select.value = "0";
-    await loadCandidate("0");
+  const smartwatchIndex=match.candidates.findIndex((candidate)=>/smart\s*watch|smartwatch|galaxy\s*watch/i.test(String(candidate.device||"")));
+  const defaultIndex=!ambiguous&&match.candidates.length===1?0:smartwatchIndex;
+  if(defaultIndex>=0) {
+    select.value=String(defaultIndex);
+    await loadCandidate(String(defaultIndex));
   } else {
     select.value = "";
     await loadCandidate("");
@@ -1036,8 +1294,14 @@ async function renderSelectedEvent(event) {
 
 function setSignalEmpty(message) {
   state.signalChannels = null;
+  state.signalSourceChannels = null;
+  state.signalElapsedTime = null;
   state.signalFrequencySummary = null;
   state.signalSpectrum = null;
+  state.signalOriginalSpectrum = null;
+  $("#signal-source-psd").checked=false;
+  $("#signal-source-psd").disabled=true;
+  $("#signal-filter-status").textContent="Select a source signal to apply filtering";
   ["#acc-band-canvas", "#gyr-band-canvas"].forEach((selector) => { const canvas=$(selector);canvas.getContext("2d").clearRect(0,0,canvas.width,canvas.height); });
   $("#signal-empty").textContent = message;
   $("#signal-empty").classList.remove("hidden");
@@ -1059,6 +1323,14 @@ function decodeFloatChannels(buffer, sampleCount) {
   return channels;
 }
 
+function decodeElapsedTimes(buffer, sampleCount) {
+  const expected = sampleCount * 8;
+  if (buffer.byteLength !== expected) throw new Error(`Elapsed-time byte length mismatch: expected ${expected}, received ${buffer.byteLength}`);
+  const view = new DataView(buffer), values = new Float64Array(sampleCount);
+  for (let sample = 0; sample < sampleCount; sample++) values[sample] = view.getFloat64(sample * 8, true);
+  return values;
+}
+
 function decodeSpectrum(buffer, frequencyCount, nperseg, sampleRate) {
   const expected = frequencyCount * 6 * 4;
   if (buffer.byteLength !== expected) throw new Error(`Spectrum byte length mismatch: expected ${expected}, received ${buffer.byteLength}`);
@@ -1068,6 +1340,142 @@ function decodeSpectrum(buffer, frequencyCount, nperseg, sampleRate) {
     for (let bin = 0; bin < frequencyCount; bin++) channels[channel][bin] = view.getFloat32((channel * frequencyCount + bin) * 4, true);
   }
   return {frequency, channels};
+}
+
+const BUTTERWORTH_Q = [0.541196100146197, 1.306562964876377];
+
+function makeBiquad(type, cutoffHz, sampleRate, q) {
+  const frequency=Math.min(sampleRate*.499,Math.max(.001,cutoffHz));
+  const omega=2*Math.PI*frequency/sampleRate, cosine=Math.cos(omega), sine=Math.sin(omega), alpha=sine/(2*q);
+  let b0,b1,b2;
+  if(type==="lowpass"){b0=(1-cosine)/2;b1=1-cosine;b2=b0;}
+  else if(type==="highpass"){b0=(1+cosine)/2;b1=-(1+cosine);b2=b0;}
+  else throw new Error(`Unsupported filter section: ${type}`);
+  const a0=1+alpha,a1=-2*cosine,a2=1-alpha;
+  return {b0:b0/a0,b1:b1/a0,b2:b2/a0,a1:a1/a0,a2:a2/a0};
+}
+
+function runBiquad(values, coefficients) {
+  const output=new Float64Array(values.length);
+  if(!values.length)return output;
+  const {b0,b1,b2,a1,a2}=coefficients, first=values[0];
+  const dcGain=(b0+b1+b2)/(1+a1+a2);
+  let z1=dcGain*first-b0*first,z2=b2*first-a2*dcGain*first;
+  for(let i=0;i<values.length;i++){
+    const value=values[i],result=b0*value+z1;
+    z1=b1*value-a1*result+z2;z2=b2*value-a2*result;output[i]=result;
+  }
+  return output;
+}
+
+function zeroPhaseBiquad(values, coefficients, padLength) {
+  const count=values.length,pad=Math.min(Math.max(0,count-1),padLength);
+  const extended=new Float64Array(count+pad*2);
+  for(let i=0;i<pad;i++)extended[pad-1-i]=values[Math.min(count-1,i+1)];
+  extended.set(values,pad);
+  for(let i=0;i<pad;i++)extended[pad+count+i]=values[Math.max(0,count-2-i)];
+  let filtered=runBiquad(extended,coefficients);
+  filtered.reverse();filtered=runBiquad(filtered,coefficients);filtered.reverse();
+  return filtered.slice(pad,pad+count);
+}
+
+function filterSignalChannel(input, type, lowHz, highHz, sampleRate) {
+  if(type==="none")return input;
+  const filterKinds=type==="bandpass"?["highpass","lowpass"]:[type];
+  const sections=[];
+  for(const filterKind of filterKinds){
+    const cutoff=filterKind==="highpass"?lowHz:highHz;
+    for(const q of BUTTERWORTH_Q)sections.push(makeBiquad(filterKind,cutoff,sampleRate,q));
+  }
+  const lowest=type==="highpass"?lowHz:type==="bandpass"?lowHz:highHz;
+  const padLength=Math.ceil(3*sampleRate/lowest);
+  let output=Float64Array.from(input);
+  for(const section of sections)output=zeroPhaseBiquad(output,section,padLength);
+  return Float32Array.from(output);
+}
+
+function fftInPlace(real, imaginary) {
+  const n=real.length;
+  for(let i=1,j=0;i<n;i++){
+    let bit=n>>1;
+    for(;j&bit;bit>>=1)j^=bit;
+    j^=bit;
+    if(i<j){[real[i],real[j]]=[real[j],real[i]];[imaginary[i],imaginary[j]]=[imaginary[j],imaginary[i]];}
+  }
+  for(let size=2;size<=n;size<<=1){
+    const angle=-2*Math.PI/size,stepReal=Math.cos(angle),stepImaginary=Math.sin(angle),half=size>>1;
+    for(let start=0;start<n;start+=size){
+      let twiddleReal=1,twiddleImaginary=0;
+      for(let j=0;j<half;j++){
+        const even=start+j,odd=even+half;
+        const oddReal=real[odd]*twiddleReal-imaginary[odd]*twiddleImaginary;
+        const oddImaginary=real[odd]*twiddleImaginary+imaginary[odd]*twiddleReal;
+        real[odd]=real[even]-oddReal;imaginary[odd]=imaginary[even]-oddImaginary;
+        real[even]+=oddReal;imaginary[even]+=oddImaginary;
+        const nextReal=twiddleReal*stepReal-twiddleImaginary*stepImaginary;
+        twiddleImaginary=twiddleReal*stepImaginary+twiddleImaginary*stepReal;twiddleReal=nextReal;
+      }
+    }
+  }
+}
+
+function computeWelchSpectrum(channels, sampleRate) {
+  const sampleCount=channels[0]?.length||0;
+  if(sampleCount<8)throw new Error("At least 8 samples are required to calculate a Welch PSD.");
+  const nperseg=Math.min(1024,sampleCount),fftLength=2**Math.ceil(Math.log2(nperseg)),half=fftLength>>1,step=Math.floor(nperseg/2);
+  const window=Float64Array.from({length:nperseg},(_,i)=>.5-.5*Math.cos(2*Math.PI*i/nperseg));
+  const windowPower=window.reduce((sum,value)=>sum+value*value,0),frequency=Float64Array.from({length:half+1},(_,i)=>i*sampleRate/fftLength);
+  const segments=Math.floor((sampleCount-nperseg)/step)+1,result=[];
+  for(const channel of channels){
+    const power=new Float64Array(half+1);
+    for(let start=0;start+nperseg<=sampleCount;start+=step){
+      let mean=0;for(let i=0;i<nperseg;i++)mean+=channel[start+i];mean/=nperseg;
+      const real=new Float64Array(fftLength),imaginary=new Float64Array(fftLength);
+      for(let i=0;i<nperseg;i++)real[i]=(channel[start+i]-mean)*window[i];
+      fftInPlace(real,imaginary);
+      for(let bin=0;bin<=half;bin++){
+        const oneSided=bin>0&&bin<half?2:1;
+        power[bin]+=oneSided*(real[bin]*real[bin]+imaginary[bin]*imaginary[bin])/(sampleRate*windowPower);
+      }
+    }
+    for(let bin=0;bin<power.length;bin++)power[bin]/=segments;
+    result.push(Float32Array.from(power));
+  }
+  return {frequency,channels:result};
+}
+
+function updateSignalFilterControls() {
+  const type=$("#signal-filter-type").value;
+  $("#filter-low-control").classList.toggle("hidden",!(["highpass","bandpass"].includes(type)));
+  $("#filter-high-control").classList.toggle("hidden",!(["lowpass","bandpass"].includes(type)));
+  const overlay=$("#signal-source-psd");
+  overlay.disabled=!state.signalOriginalSpectrum||type==="none";
+  if(overlay.disabled)overlay.checked=false;
+}
+
+function applySignalFilter() {
+  if(!state.signalSourceChannels||!state.dataset?.signal)return;
+  const type=$("#signal-filter-type").value,sampleRate=state.dataset.signal.sampling_rate_hz,nyquist=sampleRate/2;
+  const lowHz=Number($("#signal-filter-low").value),highHz=Number($("#signal-filter-high").value);
+  if(["highpass","bandpass"].includes(type)&&(!Number.isFinite(lowHz)||lowHz<=0||lowHz>=nyquist)){
+    $("#signal-filter-status").textContent=`Low cutoff must be between 0 and ${fmt(nyquist,1)} Hz`;return;
+  }
+  if(["lowpass","bandpass"].includes(type)&&(!Number.isFinite(highHz)||highHz<=0||highHz>=nyquist)){
+    $("#signal-filter-status").textContent=`High cutoff must be between 0 and ${fmt(nyquist,1)} Hz`;return;
+  }
+  if(type==="bandpass"&&lowHz>=highHz){$("#signal-filter-status").textContent="Low cutoff must be below high cutoff";return;}
+  try{
+    const channels=state.signalSourceChannels.map((channel)=>filterSignalChannel(channel,type,lowHz,highHz,sampleRate));
+    state.signalChannels=channels;
+    state.signalSpectrum=computeWelchSpectrum(channels,sampleRate);
+    drawTimeSeries($("#acc-canvas"),channels,sampleRate,0,"m/s²", state.signalElapsedTime);
+    drawTimeSeries($("#gyr-canvas"),channels,sampleRate,3,"deg/s",state.signalElapsedTime);
+    const reference=$("#signal-source-psd").checked?state.signalOriginalSpectrum:null;
+    drawPSD($("#acc-psd-canvas"),state.signalSpectrum,0,reference);
+    drawPSD($("#gyr-psd-canvas"),state.signalSpectrum,3,reference);
+    const name=type==="none"?"Unfiltered source signal":type==="bandpass"?`Zero-phase 4th-order Butterworth high-pass ${lowHz} Hz + low-pass ${highHz} Hz`:`Zero-phase 4th-order Butterworth ${type} ${type==="lowpass"?highHz:lowHz} Hz`;
+    $("#signal-filter-status").textContent=`${name} · ${fmt(sampleRate,1)} Hz · Welch PSD recalculated`;
+  }catch(error){$("#signal-filter-status").textContent=`Filter could not be applied: ${error.message||error}`;}
 }
 
 function setupCanvas(canvas, height) {
@@ -1083,7 +1491,7 @@ function setupCanvas(canvas, height) {
 
 const AXIS_COLORS = ["#357c91", "#d28b47", "#6d9b73"];
 
-function drawTimeSeries(canvas, channels, sampleRate, offset, unit) {
+function drawTimeSeries(canvas, channels, sampleRate, offset, unit, elapsedTimes = null) {
   const {ctx,width,height} = setupCanvas(canvas, 210);
   const left = 45, right = 10, top = 13, bottom = 23, plotW = width-left-right, plotH = height-top-bottom;
   const arrays = channels.slice(offset, offset+3);
@@ -1098,29 +1506,40 @@ function drawTimeSeries(canvas, channels, sampleRate, offset, unit) {
     const y=top+tick*plotH/4;ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(width-right,y);ctx.stroke();
     const value=max-(tick/4)*(max-min);ctx.textAlign="right";ctx.fillText(value.toPrecision(3),left-6,y+3);
   }
-  const duration=channels[0].length/sampleRate;
+  const hasElapsed=elapsedTimes?.length===channels[0].length&&elapsedTimes.length>0&&Number.isFinite(elapsedTimes[0])&&Number.isFinite(elapsedTimes[elapsedTimes.length-1]);
+  const timeStart=hasElapsed?elapsedTimes[0]:0,timeEnd=hasElapsed?elapsedTimes[elapsedTimes.length-1]:channels[0].length/sampleRate;
+  const timeSpan=Math.max(Number.EPSILON,timeEnd-timeStart);
   for(let tick=0;tick<=4;tick++){
     const x=left+tick*plotW/4;ctx.beginPath();ctx.moveTo(x,top);ctx.lineTo(x,height-bottom);ctx.stroke();
-    ctx.textAlign="center";ctx.fillText((duration*tick/4).toFixed(1),x,height-5);
+    ctx.textAlign="center";ctx.fillText((timeStart+timeSpan*tick/4).toFixed(1),x,height-5);
   }
   arrays.forEach((arr,axis)=>{
     ctx.beginPath();ctx.strokeStyle=AXIS_COLORS[axis];ctx.lineWidth=1.05;
-    const stride=Math.max(1,Math.floor(arr.length/Math.max(1,plotW*1.5)));
-    for(let i=0;i<arr.length;i+=stride){const x=left+(i/(arr.length-1))*plotW;const y=top+(max-arr[i])/(max-min)*plotH;if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);}
+    if(arr.length<=plotW*2){
+      for(let i=0;i<arr.length;i++){const fraction=hasElapsed?(elapsedTimes[i]-timeStart)/timeSpan:i/(arr.length-1);const x=left+fraction*plotW;const y=top+(max-arr[i])/(max-min)*plotH;if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);}
+    }else{
+      for(let pixel=0;pixel<Math.ceil(plotW);pixel++){
+        const start=Math.floor(pixel*arr.length/plotW),end=Math.max(start+1,Math.floor((pixel+1)*arr.length/plotW));
+        let low=Infinity,high=-Infinity;for(let i=start;i<Math.min(end,arr.length);i++){low=Math.min(low,arr[i]);high=Math.max(high,arr[i]);}
+        const x=left+pixel,yLow=top+(max-low)/(max-min)*plotH,yHigh=top+(max-high)/(max-min)*plotH;
+        ctx.moveTo(x,yHigh);ctx.lineTo(x,yLow);
+      }
+    }
     ctx.stroke();
   });
   ctx.textAlign="left";arrays.forEach((_,axis)=>{ctx.fillStyle=AXIS_COLORS[axis];ctx.fillText(["X","Y","Z"][axis],left+axis*23,10);});
   ctx.textAlign="right";ctx.fillStyle=isDarkTheme()?"#a9b7c2":"#89969f";ctx.fillText(unit,width-right,10);
 }
 
-function drawPSD(canvas, spectrum, channelOffset) {
+function drawPSD(canvas, spectrum, channelOffset, referenceSpectrum=null) {
   const {ctx,width,height}=setupCanvas(canvas,180),left=45,right=10,top=14,bottom=24,plotW=width-left-right,plotH=height-top-bottom;
   ctx.clearRect(0,0,width,height);
   const axes=spectrum?.channels?.slice(channelOffset,channelOffset+3),frequency=spectrum?.frequency;
   if(!axes||!frequency?.length)return;
-  const maxHz=Math.min(20,frequency[frequency.length-1]);
+  const maxHz=Math.min(50,frequency[frequency.length-1]);
   let minLog=Infinity,maxLog=-Infinity;
   axes.forEach((values)=>values.forEach((power,index)=>{if(frequency[index]<=maxHz&&power>0){const value=Math.log10(power);minLog=Math.min(minLog,value);maxLog=Math.max(maxLog,value);}}));
+  if(referenceSpectrum)referenceSpectrum.channels.slice(channelOffset,channelOffset+3).forEach((values)=>values.forEach((power,index)=>{if(referenceSpectrum.frequency[index]<=maxHz&&power>0){const value=Math.log10(power);minLog=Math.min(minLog,value);maxLog=Math.max(maxLog,value);}}));
   if(!Number.isFinite(minLog)||!Number.isFinite(maxLog))return;
   if(maxLog-minLog<1){maxLog+=.5;minLog-=.5;}
   const y=(value)=>top+(maxLog-value)/(maxLog-minLog)*plotH,x=(hz)=>left+hz/maxHz*plotW;
@@ -1129,6 +1548,11 @@ function drawPSD(canvas, spectrum, channelOffset) {
   for(let tick=0;tick<=4;tick++){const yy=top+tick*plotH/4;ctx.beginPath();ctx.moveTo(left,yy);ctx.lineTo(width-right,yy);ctx.stroke();ctx.fillText((maxLog-tick*(maxLog-minLog)/4).toFixed(1),left-6,yy+3);}
   for(let hz=0;hz<=maxHz;hz+=5){const xx=x(hz);ctx.beginPath();ctx.moveTo(xx,top);ctx.lineTo(xx,height-bottom);ctx.stroke();ctx.textAlign="center";ctx.fillText(String(hz),xx,height-5);}
   axes.forEach((values,axis)=>{ctx.beginPath();ctx.strokeStyle=AXIS_COLORS[axis];ctx.lineWidth=1.1;let started=false;for(let i=0;i<values.length;i++){if(frequency[i]>maxHz)break;const power=values[i];if(!(power>0))continue;const xx=x(frequency[i]),yy=y(Math.log10(power));if(!started){ctx.moveTo(xx,yy);started=true;}else ctx.lineTo(xx,yy);}ctx.stroke();});
+  if(referenceSpectrum){
+    const referenceAxes=referenceSpectrum.channels.slice(channelOffset,channelOffset+3),referenceFrequency=referenceSpectrum.frequency;
+    referenceAxes.forEach((values,axis)=>{ctx.beginPath();ctx.strokeStyle=AXIS_COLORS[axis];ctx.lineWidth=1;ctx.setLineDash([3,3]);let started=false;for(let i=0;i<values.length;i++){if(referenceFrequency[i]>maxHz)break;const power=values[i];if(!(power>0))continue;const xx=x(referenceFrequency[i]),yy=y(Math.log10(power));if(!started){ctx.moveTo(xx,yy);started=true;}else ctx.lineTo(xx,yy);}ctx.stroke();});
+    ctx.setLineDash([]);
+  }
   ctx.textAlign="left";axes.forEach((_,axis)=>{ctx.fillStyle=AXIS_COLORS[axis];ctx.fillText(["X","Y","Z"][axis],left+axis*22,10);});
 }
 
@@ -1187,7 +1611,32 @@ function renderSeedOverview() {
   $("#test-detail").classList.add("hidden");
   $("#threshold-chip b").textContent="—";
   $("#page-title").textContent="Seed results overview";
-  $("#page-subtitle").textContent=`${state.run.run_family} · compare stored metrics for each training seed`;
+  $("#page-subtitle").textContent=`${state.run.run_family} · compare cross-seed averages and individual seed metrics`;
+  const records=(state.run.seed_results||[]).map((entry)=>state.seedRecords.get(String(entry.seed))).filter(Boolean);
+  const meanSd=(values)=>{
+    const valid=values.filter((value)=>typeof value==="number"&&Number.isFinite(value));
+    if(!valid.length)return null;
+    const mean=valid.reduce((sum,value)=>sum+value,0)/valid.length;
+    const sd=valid.length>1?Math.sqrt(valid.reduce((sum,value)=>sum+(value-mean)**2,0)/(valid.length-1)):null;
+    return {mean,sd,n:valid.length};
+  };
+  const displayAggregate=(result,percent)=>result?`${percent?fmtPct(result.mean):result.mean.toFixed(1)} ± ${result.sd===null?"N/A":percent?fmtPct(result.sd):result.sd.toFixed(1)}`:"N/A";
+  const metricFor=(record,split,key)=>readMetric(split==="oof"?record.oof_metrics?.consensus:record.final_test_metrics,key);
+  const countFor=(record,split)=>{
+    if(split==="oof"){
+      const events=record.oof_predictions?.events;
+      return Array.isArray(events)?events.filter((event)=>event.consensus).length:readMetric(record.oof_metrics?.consensus,"n");
+    }
+    return readMetric(record.final_test_metrics,"n");
+  };
+  const aggregateRow=(label,split)=>{
+    const ba=meanSd(records.map((record)=>metricFor(record,split,"ba")));
+    const recall=meanSd(records.map((record)=>metricFor(record,split,"recall")));
+    const specificity=meanSd(records.map((record)=>metricFor(record,split,"specificity")));
+    const count=meanSd(records.map((record)=>countFor(record,split)));
+    return `<tr><td>${label}</td><td>${displayAggregate(ba,true)}</td><td>${displayAggregate(recall,true)}</td><td>${displayAggregate(specificity,true)}</td><td>${displayAggregate(count,false)}</td></tr>`;
+  };
+  $("#seed-overview-summary").innerHTML=aggregateRow("OOF","oof")+aggregateRow("Final test / holdout","test");
   $("#seed-overview-rows").innerHTML=(state.run.seed_results||[]).map((entry)=>{
     const record=state.seedRecords.get(String(entry.seed));
     if(!record)return "";
@@ -1236,13 +1685,77 @@ function renderSeedView() {
 
 function renderOof(record) {
   const events=record.oof_predictions.events||[];
+  const hasPatientIds=record.oof_predictions.event_identity_available===true && events.some((event)=>event.patient_id!==null && event.patient_id!==undefined && String(event.patient_id)!=="");
+  $("#oof-identity-note").textContent=hasPatientIds
+    ? "Patient, action, filename, and source row identifiers are available. These remain OOF predictions from this seed, not LOSO results."
+    : "This run did not save patient identifiers for OOF events, so they cannot be grouped by patient.";
+  $("#seed-oof-view-tabs").classList.toggle("hidden",!hasPatientIds);
+  $("#seed-patient-tab").classList.toggle("hidden",!hasPatientIds);
+  if(!hasPatientIds)state.seedOofView="events";
+  $("#seed-oof-view-tabs").querySelectorAll("[data-seed-oof-view]").forEach((button)=>{
+    const active=button.dataset.seedOofView===state.seedOofView;
+    button.classList.toggle("active",active);button.setAttribute("aria-selected",String(active));
+  });
+  $("#seed-oof-events").classList.toggle("hidden",state.seedOofView!=="events");
+  $("#seed-oof-patients").classList.toggle("hidden",state.seedOofView!=="patients");
   $("#oof-threshold").textContent=`Stored threshold ${fmt(record.oof_threshold,3)}`;
   const chartRows=events.map((event,index)=>({index,probability:event.probability_from_stored_logit,disagreement:!event.consensus,status:event.consensus?(event.correct_on_consensus?"Correct":"Error"):"Disagreement",id:String(index)}));
   $("#oof-plot").innerHTML=makeProbabilitySvg(chartRows,record.oof_threshold,null,(item)=>({id:item.id,xLabel:`Array row ${item.index}`,probability:item.probability,disagreement:item.disagreement,status:item.status}));
   $("#oof-rows").innerHTML=events.map((event)=>{
     const status=event.consensus?(event.correct_on_consensus?["Correct","good"]:["Error","error"]):["Disagreement","disagreement"];
-    return `<tr><td class="event-id">${event.source_array_index}</td><td class="label-pair">${escapeHTML(event.a1)} / ${escapeHTML(event.a2)}</td><td>${fmt(event.soft_target_stored,2)}</td><td class="probability-cell">${fmt(event.probability_from_stored_logit,3)}</td><td>${fmt(record.oof_threshold,3)}</td><td>${event.predicted_class_at_stored_oof_threshold?"Tremor":"No tremor"}</td><td><span class="badge ${status[1]}">${status[0]}</span></td></tr>`;
+    return `<tr><td class="event-id">${escapeHTML(event.source_array_index)}</td><td>${escapeHTML(event.patient_id??"—")}</td><td>${escapeHTML(event.action??"—")}</td><td>${escapeHTML(event.source_hdf_index??"—")}</td><td class="label-pair">${escapeHTML(event.a1)} / ${escapeHTML(event.a2)}</td><td>${fmt(event.soft_target_stored,2)}</td><td class="probability-cell">${fmt(event.probability_from_stored_logit,3)}</td><td>${fmt(record.oof_threshold,3)}</td><td>${event.predicted_class_at_stored_oof_threshold?"Tremor":"No tremor"}</td><td><span class="badge ${status[1]}">${status[0]}</span></td></tr>`;
   }).join("");
+    renderSeedPatientAnalysis(record,hasPatientIds);
+}
+
+function seedPatientGroups(record) {
+  const groups=new Map();
+  for(const event of record.oof_predictions?.events||[]) {
+    if(event.patient_id===null||event.patient_id===undefined||String(event.patient_id)==="")continue;
+    const id=String(event.patient_id);
+    if(!groups.has(id))groups.set(id,[]);
+    groups.get(id).push({...event,event_id:String(event.source_array_index),probability:event.probability_from_stored_logit,predicted_class:event.predicted_class_at_stored_oof_threshold});
+  }
+  return groups;
+}
+
+function renderSeedPatientAnalysis(record,hasPatientIds) {
+  if(!hasPatientIds)return;
+  const groups=seedPatientGroups(record);
+  const summaries=[...groups.entries()].map(([id,events])=>({id,events,summary:metricSummary(events)}));
+  summaries.sort((left,right)=>{
+    const a=left.summary.consensus?(left.summary.fp+left.summary.fn)/left.summary.consensus:-1;
+    const b=right.summary.consensus?(right.summary.fp+right.summary.fn)/right.summary.consensus:-1;
+    return b-a || (right.summary.fp+right.summary.fn)-(left.summary.fp+left.summary.fn) || left.id.localeCompare(right.id,undefined,{numeric:true});
+  });
+  if(state.selectedSeedPatient&&!groups.has(String(state.selectedSeedPatient)))state.selectedSeedPatient=null;
+  $("#seed-patient-count").textContent=`${summaries.length} patients`;
+  $("#seed-patient-rows").innerHTML=summaries.map(({id,summary},index)=>{
+    const specificity=summary.negative?`${summary.tn}/${summary.negative}`:"N/A";
+    const recall=summary.positive?`${summary.tp}/${summary.positive}`:"N/A";
+    const diagnosis=seedPatientMetadataValue(id,"Diagnosis-Coded");
+    const age=seedPatientMetadataValue(id,"Age-Coded");
+    return `<tr class="cohort-patient-row${id===String(state.selectedSeedPatient)?" selected-row":""}" data-seed-patient="${escapeHTML(id)}"><td>${index+1}</td><td class="event-id">${escapeHTML(id)}</td><td>${summary.consensus}/${summary.total}</td><td>${summary.negative}/${summary.positive}</td><td class="cohort-fraction">${specificity}</td><td class="cohort-fraction">${recall}</td><td>${escapeHTML(diagnosis)}</td><td>${escapeHTML(age)}</td></tr>`;
+  }).join("")||'<tr><td colspan="8" class="empty-cell">No patient identifiers are available.</td></tr>';
+  const selected=groups.get(String(state.selectedSeedPatient));
+  if(!selected) {
+    $("#seed-patient-title").textContent="Choose a patient";
+    $("#seed-patient-summary").textContent="";
+    $("#seed-patient-event-rows").innerHTML='<tr><td colspan="7" class="empty-cell">Select a patient to inspect its OOF events.</td></tr>';
+  } else {
+    const summary=metricSummary(selected);
+    $("#seed-patient-title").textContent=`Patient ${state.selectedSeedPatient}`;
+    $("#seed-patient-summary").textContent=`${summary.consensus}/${summary.total} consensus events · ${summary.fp+summary.fn} errors`;
+    $("#seed-patient-event-rows").innerHTML=selected.map((event)=>{
+      const status=eventStatus(event);
+      return `<tr><td class="event-id">${escapeHTML(event.source_array_index)}</td><td>${escapeHTML(event.action??"—")}</td><td>${escapeHTML(event.source_hdf_index??"—")}</td><td>${escapeHTML(event.filename??"—")}</td><td class="label-pair">${escapeHTML(event.a1)} / ${escapeHTML(event.a2)}</td><td class="probability-cell">${fmt(event.probability,3)}</td><td><span class="badge ${status[1]}">${status[0]}</span></td></tr>`;
+    }).join("");
+  }
+  $("#seed-patient-rows").querySelectorAll("[data-seed-patient]").forEach((row)=>row.addEventListener("click",()=>{
+    state.selectedSeedPatient=row.dataset.seedPatient;
+    renderSeedPatientAnalysis(record,true);
+  }));
+  ensureSeedPatientMetadata(groups.keys(),"oof",record);
 }
 
 function renderTest(record) {
@@ -1257,9 +1770,164 @@ function renderTest(record) {
   if(Array.isArray(cm)&&cm.length===2){
     $("#confusion-matrix").innerHTML=`<div class="confusion-title">CONFUSION MATRIX · STORED COUNTS</div><table class="confusion-table"><thead><tr><th></th><th>Pred 0</th><th>Pred 1</th></tr></thead><tbody><tr><th>True 0</th><td>${escapeHTML(cm[0]?.[0])}</td><td>${escapeHTML(cm[0]?.[1])}</td></tr><tr><th>True 1</th><td>${escapeHTML(cm[1]?.[0])}</td><td>${escapeHTML(cm[1]?.[1])}</td></tr></tbody></table>`;
   }else $("#confusion-matrix").textContent="No confusion matrix is present in this run artifact.";
+  renderHoldoutPatientAnalysis(record,record.final_test_event_predictions_available===true);
+}
+
+function renderHoldoutPatientAnalysis(record,hasPatientIds) {
+  const events=record.holdout_predictions?.events||[];
+  hasPatientIds=hasPatientIds&&events.some((event)=>event.patient_id!==null&&event.patient_id!==undefined&&String(event.patient_id)!=="");
+  $("#test-identity-note").textContent=hasPatientIds
+    ? "Patient, action, filename, source row, labels, and stored-threshold predictions are available for the final-test events."
+    : "This run does not contain patient-identified final-test event predictions.";
+  $("#seed-test-view-tabs").classList.toggle("hidden",!hasPatientIds);
+  $("#test-aggregate-panel").classList.toggle("hidden",hasPatientIds&&state.seedTestView==="patients");
+  $("#test-patient-panel").classList.toggle("hidden",!hasPatientIds||state.seedTestView!=="patients");
+  $("#seed-test-view-tabs").querySelectorAll("[data-seed-test-view]").forEach((button)=>{
+    const active=button.dataset.seedTestView===state.seedTestView;button.classList.toggle("active",active);button.setAttribute("aria-selected",String(active));
+  });
+  if(!hasPatientIds)return;
+  const groups=new Map();
+  for(const event of events) {
+    if(event.patient_id===null||event.patient_id===undefined||String(event.patient_id)==="")continue;
+    const id=String(event.patient_id);
+    if(!groups.has(id))groups.set(id,[]);
+    groups.get(id).push({...event,event_id:String(event.source_array_index),probability:event.probability_from_stored_logit,predicted_class:event.predicted_class_at_stored_threshold});
+  }
+  const summaries=[...groups.entries()].map(([id,rows])=>({id,rows,summary:metricSummary(rows)}));
+  summaries.sort((left,right)=>{
+    const a=left.summary.consensus?(left.summary.fp+left.summary.fn)/left.summary.consensus:-1;
+    const b=right.summary.consensus?(right.summary.fp+right.summary.fn)/right.summary.consensus:-1;
+    return b-a||(right.summary.fp+right.summary.fn)-(left.summary.fp+left.summary.fn)||left.id.localeCompare(right.id,undefined,{numeric:true});
+  });
+  summaries.forEach((row,index)=>{row.difficultyRank=index+1;row.diagnosis=seedPatientMetadataValue(row.id,"Diagnosis-Coded");row.age=seedPatientMetadataValue(row.id,"Age-Coded");});
+  if(state.holdoutHeaderSort) {
+    const direction=state.holdoutHeaderDirection==="asc"?1:-1;
+    summaries.sort((left,right)=>{
+      const key=state.holdoutHeaderSort;
+      let a,b;
+      if(key==="rank"){a=left.difficultyRank;b=right.difficultyRank;}
+      else if(key==="patient")return direction*left.id.localeCompare(right.id,undefined,{numeric:true});
+      else if(key==="consensus"){a=left.summary.total?left.summary.consensus/left.summary.total:null;b=right.summary.total?right.summary.consensus/right.summary.total:null;}
+      else if(key==="class-count"){a=left.summary.negative;b=right.summary.negative;if(a===b){a=left.summary.positive;b=right.summary.positive;}}
+      else if(key==="specificity"){a=left.summary.negative?left.summary.tn/left.summary.negative:null;b=right.summary.negative?right.summary.tn/right.summary.negative:null;}
+      else if(key==="recall"){a=left.summary.positive?left.summary.tp/left.summary.positive:null;b=right.summary.positive?right.summary.tp/right.summary.positive:null;}
+      else if(key==="diagnosis"){a=left.diagnosis;b=right.diagnosis;}
+      else {a=left.age;b=right.age;}
+      if(a===null&&b!==null)return 1;
+      if(b===null&&a!==null)return -1;
+      const order=typeof a==="string"?a.localeCompare(b,undefined,{numeric:true}):a-b;
+      return direction*order||left.id.localeCompare(right.id,undefined,{numeric:true});
+    });
+  }
+  if(state.selectedHoldoutPatient&&!groups.has(String(state.selectedHoldoutPatient)))state.selectedHoldoutPatient=null;
+  $("#test-patient-count").textContent=`${summaries.length} patients`;
+  $("#test-patient-rows").innerHTML=summaries.map(({id,summary,diagnosis,age},index)=>{
+    const specificity=summary.negative?`${summary.tn}/${summary.negative}`:"N/A";
+    const recall=summary.positive?`${summary.tp}/${summary.positive}`:"N/A";
+    return `<tr class="cohort-patient-row${id===String(state.selectedHoldoutPatient)?" selected-row":""}" data-holdout-patient="${escapeHTML(id)}"><td>${index+1}</td><td class="event-id">${escapeHTML(id)}</td><td>${summary.consensus}/${summary.total}</td><td>${summary.negative}/${summary.positive}</td><td class="cohort-fraction">${specificity}</td><td class="cohort-fraction">${recall}</td><td>${escapeHTML(diagnosis)}</td><td>${escapeHTML(age)}</td></tr>`;
+  }).join("")||'<tr><td colspan="8" class="empty-cell">No patient identifiers are available.</td></tr>';
+  document.querySelectorAll(".seed-holdout-sort-button").forEach((button)=>{
+    const active=state.holdoutHeaderSort===button.dataset.holdoutSort;
+    const label=button.dataset.label||button.textContent.trim();button.dataset.label=label;
+    button.innerHTML=`${escapeHTML(label)}${active?`<span aria-hidden="true"> ${state.holdoutHeaderDirection==="asc"?"&uarr;":"&darr;"}</span>`:""}`;
+    button.setAttribute("aria-label",active?`${label}, sorted ${state.holdoutHeaderDirection==="asc"?"ascending":"descending"}`:`Sort by ${label}`);
+    button.closest("th").setAttribute("aria-sort",active?(state.holdoutHeaderDirection==="asc"?"ascending":"descending"):"none");
+  });
+  const selected=groups.get(String(state.selectedHoldoutPatient));
+  if(!selected) {
+    $("#test-patient-title").textContent="Choose a patient";
+    $("#test-patient-summary").textContent="";
+    $("#test-patient-event-rows").innerHTML='<tr><td colspan="7" class="empty-cell">Select a patient to inspect its holdout events.</td></tr>';
+  } else {
+    const summary=metricSummary(selected);
+    $("#test-patient-title").textContent=`Patient ${state.selectedHoldoutPatient}`;
+    $("#test-patient-summary").textContent=`${summary.consensus}/${summary.total} consensus events · ${summary.fp+summary.fn} errors`;
+    $("#test-patient-event-rows").innerHTML=selected.map((event)=>{
+      const status=eventStatus(event);
+      return `<tr><td class="event-id">${escapeHTML(event.source_array_index)}</td><td>${escapeHTML(event.action??"—")}</td><td>${escapeHTML(event.source_hdf_index??"—")}</td><td>${escapeHTML(event.filename??"—")}</td><td class="label-pair">${escapeHTML(event.a1)} / ${escapeHTML(event.a2)}</td><td class="probability-cell">${fmt(event.probability,3)}</td><td><span class="badge ${status[1]}">${status[0]}</span></td></tr>`;
+    }).join("");
+  }
+  $("#test-patient-rows").querySelectorAll("[data-holdout-patient]").forEach((row)=>row.addEventListener("click",()=>{
+    openHoldoutPatient(row.dataset.holdoutPatient,record).catch((error)=>{
+      $("#holdout-patient-load-status").textContent=`Could not open patient inspection: ${error.message||error}`;
+      $("#holdout-patient-load-status").classList.remove("hidden");
+    });
+  }));
+  ensureSeedPatientMetadata(groups.keys(),"test",record);
+}
+
+async function openHoldoutPatient(patientId,record) {
+  const token=++state.holdoutOpenToken;
+  const seed=String(state.selectedSeed);
+  state.selectedHoldoutPatient=String(patientId);
+  $("#holdout-patient-load-status").textContent="Loading patient metadata and source segments…";
+  $("#holdout-patient-load-status").classList.remove("hidden");
+  const [metadata,signals] = await Promise.all([
+    readDatasetJSON(`patients/${patientId}.json`),
+    sourceSignalsForPatient(patientId),
+  ]);
+  if(token!==state.holdoutOpenToken||seed!==String(state.selectedSeed)||state.split!=="test")return;
+  const events=(record.holdout_predictions?.events||[]).filter((event)=>String(event.patient_id)===String(patientId));
+  const normalized=events.map((event)=>{
+    const filename=String(event.filename||"").split(/[\\/]/).pop().toLocaleLowerCase();
+    const matchingRows=filename?signals.filter((row)=>String(row.patient_id)===String(event.patient_id)&&row.action===event.action&&String(row.source_filename||"").split(/[\\/]/).pop().toLocaleLowerCase()===filename):[];
+    const candidates=matchingRows.map((row)=>({
+      source_h5_index:row.source_h5_index,source_filename:row.source_filename,source_file:row.source_file,device:row.device,
+      source_segment_index:row.source_segment_index,epoch:row.epoch,previous_epoch:row.previous_epoch,next_epoch:row.next_epoch,
+      nearest_transition_index:row.nearest_transition_index,start_elapsed_time_s:row.start_elapsed_time_s,end_elapsed_time_s:row.end_elapsed_time_s,
+      start_timestamp_us:row.start_timestamp_us,end_timestamp_us:row.end_timestamp_us,
+      dataset_a1:row.a1,dataset_a2:row.a2,
+      sample_count:row.sample_count,signal_ref:row.signal_ref,spectrum_ref:row.spectrum_ref,
+      elapsed_time_ref:row.elapsed_time_ref,elapsed_time_sample_count:row.elapsed_time_sample_count,
+      spectrum_frequency_count:row.spectrum_frequency_count,spectrum_nperseg:row.spectrum_nperseg,
+      frequency_summary:row.frequency_summary,
+      match_method:matchingRows.length===1?"Unique patient/action/filename match":"Candidate matches patient/action/filename; source remains ambiguous",
+    }));
+    const consensus=Number(event.a1)===Number(event.a2)&&[0,1].includes(Number(event.a1));
+    return {
+      ...event,event_id:String(event.source_array_index),source_npz_index:event.source_array_index,
+      probability:event.probability_from_stored_logit,soft_target_stored:event.soft_target_from_a1_a2,
+      predicted_class:event.predicted_class_at_stored_threshold,consensus,
+      correct_on_consensus:consensus?Number(event.predicted_class_at_stored_threshold)===Number(event.a1):null,
+      signal_match:candidates.length===1?{status:"matched",candidates}:candidates.length>1?{status:"ambiguous",reason:"Multiple dataset source rows match this patient's action and filename.",candidates}:{status:"unmatched",reason:"No dataset source row matches this patient's action and filename.",candidates:[]},
+    };
+  });
+  const previousPatientData=state.patientData;
+  state.holdoutReturnState={patientData:previousPatientData,patient:state.patient,selectedEventId:state.selectedEventId,globalTab:state.globalTab};
+  state.patient=String(patientId);
+  state.selectedEventId=null;
+  state.patientData={patient_id:String(patientId),events:normalized,source_transition_events:transitionSignalEvents(signals,normalized),metadata_records:metadata.metadata_records||[],metadata_match_count:(metadata.metadata_records||[]).length,analysis_threshold:record.final_test_threshold};
+  state.globalTab="subject";
+  $("#subject-panel").classList.remove("hidden");
+  $("#seed-subject-mount").appendChild($("#subject-panel"));
+  $("#holdout-patient-cohort").classList.add("hidden");
+  $("#holdout-patient-inspection").classList.remove("hidden");
+  $("#holdout-patient-load-status").classList.add("hidden");
+  renderPatient();
+  updateGlobalHeading();
+  $("#page-title").textContent=`Patient ${patientId} · final test`;
+}
+
+function closeHoldoutPatient() {
+  ++state.holdoutOpenToken;
+  if(!state.holdoutReturnState)return;
+  ++state.signalToken;
+  const panel=$("#subject-panel"),anchor=$("#subject-panel-anchor");
+  panel.classList.add("hidden");
+  anchor.parentNode.insertBefore(panel,anchor.nextSibling);
+  $("#holdout-patient-inspection").classList.add("hidden");
+  $("#holdout-patient-cohort").classList.remove("hidden");
+  state.patientData=state.holdoutReturnState.patientData;
+  state.patient=state.holdoutReturnState.patient;
+  state.selectedEventId=state.holdoutReturnState.selectedEventId;
+  state.globalTab=state.holdoutReturnState.globalTab;
+  state.holdoutReturnState=null;
+  setSignalEmpty("Choose an event to load its signal. Ambiguous links require you to choose a source record.");
+  renderHoldoutPatientAnalysis(state.seedRecords.get(String(state.selectedSeed)),true);
 }
 
 function setView(view) {
+  if(view!=="seeds")closeHoldoutPatient();
   state.activeView=view;
   document.querySelectorAll(".nav-item").forEach((button)=>{const active=button.dataset.view===view;button.classList.toggle("active",active);button.setAttribute("aria-selected",String(active));});
   $("#global-view").classList.toggle("hidden",view!=="global");
@@ -1276,21 +1944,33 @@ function setView(view) {
 }
 
 function installHandlers() {
-  const themeSelect = $("#theme-select");
-  let themePreference = "system";
-  try { themePreference = localStorage.getItem("parkinson-theme") || "system"; } catch {}
-  if (!["system", "light", "dark"].includes(themePreference)) themePreference = "system";
-  themeSelect.value = themePreference;
-  applyTheme(themePreference);
-  themeSelect.addEventListener("change", () => {
-    themePreference = themeSelect.value;
-    try { localStorage.setItem("parkinson-theme", themePreference); } catch {}
-    applyTheme(themePreference);
-  });
+  applyTheme("system");
   const colorScheme = window.matchMedia("(prefers-color-scheme: dark)");
-  colorScheme.addEventListener?.("change", () => { if (themePreference === "system") applyTheme("system"); });
+  colorScheme.addEventListener?.("change", () => applyTheme("system"));
   $("#retry-button").addEventListener("click",()=>{$("#error-state").classList.add("hidden");$("#loading-state").classList.remove("hidden");});
-  const updateUploadReady = () => { $("#open-workspace-button").disabled = !(state.uploadedDataset && state.uploadedRun); };
+  const updateUploadReady = () => { $("#open-workspace-button").disabled = !(state.uploadedDataset && state.uploadedRuns.length); };
+  const handleRunFiles = async(files, append) => {
+    if(!files.length)return;
+    if(!append){state.workspaceCached=false;state.cacheDisabledForSession=false;}
+    $("#upload-status").textContent=`Reading ${files.length} run JSON file${files.length===1?"":"s"}…`;
+    try{
+      const selectedIndex=await loadRunUpload(files,{append});
+      if(append){
+        state.workspaceCached=false;state.cacheDisabledForSession=false;
+        $("#run-file-name").textContent=state.runUploadName;
+        renderRunSelector(selectedIndex);
+        await selectRun(selectedIndex);
+      }else{
+        $("#run-file-name").textContent=state.runUploadName;
+      }
+      $("#upload-status").textContent=`${state.uploadedRuns.length} run${state.uploadedRuns.length===1?"":"s"} ready · same-dataset check pending`;
+      updateUploadReady();
+      await cacheSelectedPair();
+    }catch(error){
+      if(!append){state.uploadedRun=null;state.uploadedRuns=[];state.runUploadText=null;}
+      $("#upload-status").textContent=`Run JSON error: ${error.message||error}`;
+    }
+  };
   $("#dataset-file").addEventListener("change",async(event)=>{
     const file=event.target.files?.[0];if(!file)return;
     state.workspaceCached=false;state.cacheDisabledForSession=false;
@@ -1300,22 +1980,42 @@ function installHandlers() {
     await cacheSelectedPair();
   });
   $("#run-file").addEventListener("change",async(event)=>{
-    const file=event.target.files?.[0];if(!file)return;
-    state.workspaceCached=false;state.cacheDisabledForSession=false;
-    $("#run-file-name").textContent=file.name;$("#upload-status").textContent="Reading run JSON…";
-    try{await loadRunUpload(file);$("#upload-status").textContent=`Run ready · ${state.uploadedRun.run_family || state.uploadedRun.run_id || file.name}`;}catch(error){state.uploadedRun=null;$("#upload-status").textContent=`Run JSON error: ${error.message||error}`;}
-    updateUploadReady();
-    await cacheSelectedPair();
+    const files=Array.from(event.target.files||[]);if(!files.length)return;
+    await handleRunFiles(files,state.addingRuns);
+    state.addingRuns=false;
+    event.target.value="";
+  });
+  $("#add-run-file").addEventListener("change",async(event)=>{
+    const files=Array.from(event.target.files||[]);if(!files.length){state.addingRuns=false;return;}
+    await handleRunFiles(files,true);
+    state.addingRuns=false;
+    event.target.value="";
   });
   $("#open-workspace-button").addEventListener("click",openUploadedWorkspace);
   $("#forget-data-button").addEventListener("click",()=>forgetWorkspaceCopy().catch((error)=>{$("#upload-status").textContent=`Could not delete saved copy: ${error.message||error}`;}));
   $("#change-data-button").addEventListener("click",()=>{$("#dashboard").classList.add("hidden");$("#error-state").classList.add("hidden");$("#loading-state").classList.remove("hidden");});
-  $("#run-select").addEventListener("change",(event)=>selectRun(Number(event.target.value)).catch(showError));
+  $("#run-select").addEventListener("change",(event)=>{
+    if(event.target.value==="__add_run__"){
+      event.target.value=String(state.currentRunIndex);
+      state.addingRuns=true;
+      const input=$("#add-run-file");input.value="";input.click();
+      return;
+    }
+    selectRun(Number(event.target.value)).catch(showError);
+  });
   $("#patient-select").addEventListener("change",(event)=>selectPatient(event.target.value).catch(showError));
+  $("#signal-filter-type").addEventListener("change",()=>{updateSignalFilterControls();applySignalFilter();});
+  ["#signal-filter-low","#signal-filter-high"].forEach((selector)=>$(selector).addEventListener("input",applySignalFilter));
+  $("#signal-source-psd").addEventListener("change",()=>{
+    if(!state.signalSpectrum)return;
+    const reference=$("#signal-source-psd").checked?state.signalOriginalSpectrum:null;
+    drawPSD($("#acc-psd-canvas"),state.signalSpectrum,0,reference);
+    drawPSD($("#gyr-psd-canvas"),state.signalSpectrum,3,reference);
+  });
   $("#action-filter").addEventListener("change",()=>{renderProbabilityPlot();renderEventTable();});
   $("#event-filter").addEventListener("change",()=>{renderProbabilityPlot();renderEventTable();});
   $("#event-search").addEventListener("input",renderEventTable);
-  document.querySelectorAll(".global-tab").forEach((button)=>button.addEventListener("click",()=>setGlobalTab(button.dataset.globalTab)));
+  document.querySelectorAll("#global-view .global-tab").forEach((button)=>button.addEventListener("click",()=>setGlobalTab(button.dataset.globalTab)));
   $("#cohort-sort").addEventListener("change",()=>{state.cohortHeaderSort=null;renderCohort();});
   ["#cohort-action","#cohort-classes"].forEach((selector)=>$(selector).addEventListener("change",renderCohort));
   $("#cohort-min-n").addEventListener("change",renderCohort);
@@ -1330,13 +2030,47 @@ function installHandlers() {
   });
   $("#seed-tabs").addEventListener("click",(event)=>{
     const button=event.target.closest("[data-seed-tab]");if(!button)return;
+    closeHoldoutPatient();
     state.selectedSeedTab=button.dataset.seedTab;
-    if(state.selectedSeedTab!=="overview")state.selectedSeed=state.selectedSeedTab;
+    if(state.selectedSeedTab!=="overview"){
+      state.selectedSeed=state.selectedSeedTab;
+      state.seedOofView="events";
+      state.selectedSeedPatient=null;
+      state.seedTestView="summary";
+      state.selectedHoldoutPatient=null;
+      state.holdoutHeaderSort=null;
+      state.holdoutHeaderDirection="desc";
+    }
     renderSeedTabs();
     if(state.selectedSeedTab==="overview")renderSeedOverview();else renderSeedView();
   });
+  $("#seed-oof-view-tabs").addEventListener("click",(event)=>{
+    const button=event.target.closest("[data-seed-oof-view]");if(!button)return;
+    state.seedOofView=button.dataset.seedOofView;
+    $("#seed-oof-view-tabs").querySelectorAll("[data-seed-oof-view]").forEach((item)=>{
+      const active=item===button;item.classList.toggle("active",active);item.setAttribute("aria-selected",String(active));
+    });
+    const selected=state.seedRecords.get(String(state.selectedSeed));
+    if(selected)renderOof(selected);
+  });
+  $("#seed-test-view-tabs").addEventListener("click",(event)=>{
+    const button=event.target.closest("[data-seed-test-view]");if(!button)return;
+    closeHoldoutPatient();
+    state.seedTestView=button.dataset.seedTestView;
+    const selected=state.seedRecords.get(String(state.selectedSeed));
+    if(selected)renderTest(selected);
+  });
+  document.querySelectorAll(".seed-holdout-sort-button").forEach((button)=>button.addEventListener("click",()=>{
+    const key=button.dataset.holdoutSort;
+    if(state.holdoutHeaderSort===key)state.holdoutHeaderDirection=state.holdoutHeaderDirection==="asc"?"desc":"asc";
+    else{state.holdoutHeaderSort=key;state.holdoutHeaderDirection=key==="consensus"?"desc":"asc";}
+    const selected=state.seedRecords.get(String(state.selectedSeed));
+    if(selected)renderHoldoutPatientAnalysis(selected,true);
+  }));
+  $("#holdout-back-button").addEventListener("click",closeHoldoutPatient);
   document.querySelectorAll(".nav-item").forEach((button)=>button.addEventListener("click",()=>setView(button.dataset.view)));
   document.querySelectorAll(".segment").forEach((button)=>button.addEventListener("click",()=>{
+    closeHoldoutPatient();
     state.split=button.dataset.split;document.querySelectorAll(".segment").forEach((item)=>{const active=item===button;item.classList.toggle("active",active);item.setAttribute("aria-selected",String(active));});renderSeedView();
   }));
   $("#about-button").addEventListener("click",()=>$("#about-dialog").showModal());

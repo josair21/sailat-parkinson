@@ -25,7 +25,7 @@ SCHEMA_VERSION = 3
 CHANNELS = ["acc_x", "acc_y", "acc_z", "gyr_x", "gyr_y", "gyr_z"]
 UNITS = ["m/s^2", "m/s^2", "m/s^2", "deg/s", "deg/s", "deg/s"]
 REQUIRED_NPZ_KEYS = ("probability", "label", "label_a1", "label_a2", "patient", "action")
-DATASET_SCHEMA_VERSION = 3
+DATASET_SCHEMA_VERSION = 6
 
 
 def _stratified_metrics(events: list[dict[str, Any]]) -> dict[str, Any]:
@@ -337,6 +337,18 @@ def _match_events(
                     "duration_difference_s": abs(row["duration_s"] - event["duration_s"]) if event["duration_s"] is not None else None,
                     "device": row.get("device"),
                     "source_filename": row.get("source_filename"),
+                    "source_file": row.get("source_file"),
+                    "source_segment_index": row.get("source_segment_index"),
+                    "epoch": row.get("epoch"),
+                    "previous_epoch": row.get("previous_epoch"),
+                    "next_epoch": row.get("next_epoch"),
+                    "nearest_transition_index": row.get("nearest_transition_index"),
+                    "start_elapsed_time_s": row.get("start_elapsed_time_s"),
+                    "end_elapsed_time_s": row.get("end_elapsed_time_s"),
+                    "start_timestamp_us": row.get("start_timestamp_us"),
+                    "end_timestamp_us": row.get("end_timestamp_us"),
+                    "elapsed_time_ref": row.get("elapsed_time_ref"),
+                    "elapsed_time_sample_count": row.get("elapsed_time_sample_count"),
                     "frequency_summary": row["frequency_summary"],
                     "spectrum_ref": row["spectrum_ref"],
                     "spectrum_frequency_count": row["spectrum_frequency_count"],
@@ -588,8 +600,8 @@ def main() -> int:
     dataset_id = dataset_manifest["dataset_id"]
     dataset_signal_rate = _finite(dataset_manifest["signal"]["sampling_rate_hz"], "shared dataset display signal rate")
     dataset_source_rate = _finite(dataset_manifest["signal"]["source_sampling_rate_hz"], "shared dataset source signal rate")
-    if dataset_source_rate != 100.0 or dataset_signal_rate != 20.0:
-        raise ValueError(f"Expected 100 Hz source and 20 Hz display signals, dataset package says {dataset_source_rate} Hz source / {dataset_signal_rate} Hz display")
+    if dataset_source_rate != 100.0 or dataset_signal_rate != dataset_source_rate:
+        raise ValueError(f"Expected source-rate browser signals at 100 Hz, dataset package says {dataset_source_rate} Hz source / {dataset_signal_rate} Hz browser rate")
 
     metadata_path_yaml = loso_dir / "loso_metadata.yml" if loso_dir else None
     threshold = None

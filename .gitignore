@@ -4,11 +4,7 @@ conversion_output/
 /raw_data/
 /data/
 /runs/
-/local-data/*.json
-/local-data/*.zip
-/local-data/**/*.json
-/local-data/**/*.zip
-/local-data/**/*.f32.gz
+/local-data/
 *.h5
 *.npz
 *.pth

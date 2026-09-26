@@ -11,9 +11,9 @@
     <link rel="icon" type="image/png" sizes="32x32" href="assets/icons/parkinson-viewer-32.png">
     <link rel="apple-touch-icon" sizes="180x180" href="assets/icons/parkinson-viewer-180.png">
     <link rel="manifest" href="site.webmanifest">
-    <script>try{const t=localStorage.getItem("parkinson-theme");document.documentElement.dataset.theme=t==="dark"||((t!=="light")&&matchMedia("(prefers-color-scheme: dark)").matches)?"dark":"light";}catch{document.documentElement.dataset.theme=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"}</script>
-    <link rel="stylesheet" href="styles.css">
-    <script src="app.js" defer></script>
+    <script>document.documentElement.dataset.theme=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"</script>
+    <link rel="stylesheet" href="styles.css?v=13">
+    <script src="app.js?v=13" defer></script>
   </head>
   <body>
     <div class="app-frame">
@@ -31,7 +31,6 @@
         <div class="topbar-right">
           <span class="local-indicator"><span></span> LOCAL WORKSPACE</span>
           <button class="button secondary hidden" id="change-data-button" type="button">Change files</button>
-          <label class="theme-control"><span>Theme</span><select id="theme-select" aria-label="Color theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
           <button class="icon-button" id="about-button" type="button" aria-label="About this dashboard">i</button>
         </div>
       </header>
@@ -42,12 +41,13 @@
             <div class="side-label">WORKSPACE</div>
             <label class="field-label" for="run-select">Experiment</label>
             <select id="run-select" disabled><option>Loading local catalog…</option></select>
+            <input id="add-run-file" class="visually-hidden" type="file" accept=".json,application/json" multiple aria-label="Add run JSON files">
           </div>
 
           <div class="sidebar-section">
             <div class="side-label">ANALYSIS</div>
             <div class="nav-stack" role="tablist" aria-label="Analysis view">
-              <button class="nav-item active" type="button" data-view="global" role="tab" aria-selected="true">
+              <button class="nav-item active" id="global-nav-item" type="button" data-view="global" role="tab" aria-selected="true">
                 <span class="nav-icon">◫</span><span>Global LOSO</span><span class="nav-count" id="global-count">—</span>
               </button>
               <button class="nav-item" type="button" data-view="seeds" role="tab" aria-selected="false">
@@ -67,6 +67,7 @@
               <option value="postural">Postural</option>
               <option value="kinetic">Kinetic</option>
               <option value="rest-end">Rest end</option>
+              <option value="transition">Transition</option>
             </select>
             <label class="field-label spaced" for="event-filter">Labels</label>
             <select id="event-filter">
@@ -87,7 +88,7 @@
           <section id="loading-state" class="state-card">
             <div class="eyebrow">PRIVATE LOCAL WORKSPACE</div>
             <h1>Load a dataset and run</h1>
-            <p>Choose the dataset ZIP and its matching run JSON. The dashboard keeps a browser-local copy for up to 24 hours so a refresh does not require another upload. Files are never sent to the server.</p>
+            <p>Choose the dataset ZIP and one or more matching run JSON files. All runs must use the same dataset. The dashboard keeps a browser-local copy for up to 24 hours so a refresh does not require another upload. Files are never sent to the server.</p>
             <div class="upload-grid">
               <label class="upload-block" for="dataset-file">
                 <span class="upload-kicker">01 · SHARED DATASET</span><strong>Dataset archive</strong>
@@ -97,9 +98,9 @@
               </label>
               <label class="upload-block" for="run-file">
                 <span class="upload-kicker">02 · EXPERIMENT RESULTS</span><strong>Run results</strong>
-                <span class="upload-description">Choose one converted run JSON</span>
+                <span class="upload-description">Choose one or more converted run JSON files</span>
                 <span class="upload-file-name" id="run-file-name">No file selected</span>
-                <input id="run-file" type="file" accept=".json,application/json">
+                <input id="run-file" type="file" accept=".json,application/json" multiple>
               </label>
             </div>
             <p class="upload-status" id="upload-status" aria-live="polite">Select both files to continue.</p>
@@ -132,6 +133,14 @@
               </div>
               <section id="overview-panel">
               <div class="kpi-grid" id="global-kpis"></div>
+              <section class="card stratified-card hidden" id="loso-performance-summary">
+                <div class="section-heading stratified-heading">
+                  <div><div class="eyebrow">ALL HELD-OUT LOSO EVENTS</div><h2>Pooled LOSO performance</h2></div>
+                  <span class="stratified-threshold" id="loso-performance-threshold"></span>
+                </div>
+                <div class="kpi-grid" id="loso-performance-kpis"></div>
+                <p class="stratified-note" id="loso-performance-note"></p>
+              </section>
               <section class="card stratified-card">
                 <div class="section-heading stratified-heading">
                   <div><div class="eyebrow">STRATIFIED RESULTS</div><h2>Results by action and filename side</h2></div>
@@ -158,6 +167,7 @@
                 <p class="stratified-note">Boxes show the median and interquartile range of stored tremor probabilities; whiskers extend to points within 1.5 Ã— IQR. The dashed line is the runâ€™s stored threshold. Disagreements are shown separately and are not treated as ground truth.</p>
               </section>
               </section>
+              <div id="subject-panel-anchor"></div>
               <div id="subject-panel" class="hidden">
               <section class="patient-card card">
                 <div class="patient-main">
@@ -187,16 +197,16 @@
 
               <section class="card table-card">
                 <div class="section-heading table-heading">
-                  <div><div class="eyebrow">HELD-OUT EVENTS</div><h2>Prediction ledger <span class="subtle-count" id="event-count">—</span></h2></div>
+                  <div><div class="eyebrow">HELD-OUT EVENTS</div><h2>Events and transitions <span class="subtle-count" id="event-count">—</span></h2></div>
                   <div class="search-wrap"><span>⌕</span><input id="event-search" type="search" placeholder="Find action or event" aria-label="Search events"></div>
                 </div>
                 <div class="table-scroll">
                   <table>
-                    <thead><tr><th>EVENT</th><th>ACTION</th><th>FILENAME SIDE</th><th>A1 / A2</th><th>SOFT TARGET</th><th>PROBABILITY</th><th>MODEL</th><th>STATUS</th></tr></thead>
-                    <tbody id="event-rows"><tr><td colspan="8" class="empty-cell">Select a patient to inspect events.</td></tr></tbody>
+                    <thead><tr><th>EVENT</th><th>ACTION / TRANSITION</th><th>SOURCE / CONTEXT</th><th>MOMENT</th><th>A1 / A2</th><th>SOFT TARGET</th><th>PROBABILITY</th><th>MODEL</th><th>STATUS</th></tr></thead>
+                    <tbody id="event-rows"><tr><td colspan="9" class="empty-cell">Select a patient to inspect events.</td></tr></tbody>
                   </table>
                 </div>
-                <div class="chart-footnote">Filename code .00 = non-dominant; .01 = dominant. Mixed candidates mean the event's candidate filenames disagree; signal identity can still be ambiguous.</div>
+                <div class="chart-footnote">Transition rows are source HDF5 segments without labels or prediction probabilities. Only smartwatch transitions that fit between the neighboring matched actions are shown. A source transition may name an intermediate epoch that has no prediction row; the following action's stored source context must agree. Their HDF5 row index is not a timestamp and does not establish precise position within a recording. Filename code .00 = non-dominant; .01 = dominant. Mixed candidates mean the event's candidate filenames disagree; signal identity can still be ambiguous.</div>
               </section>
 
               <section class="card signal-card">
@@ -204,19 +214,26 @@
                   <div><div class="eyebrow">SOURCE SIGNAL</div><h2 id="signal-title">Select an event</h2></div>
                   <div class="signal-tools"><label for="signal-source-select" class="field-label">Source record</label><select id="signal-source-select" disabled><option>Not loaded</option></select></div>
                 </div>
-                <div class="signal-provenance" id="signal-provenance">Signals are loaded on selection. The browser receives a filtered 20 Hz preview; original-rate data stay offline.</div>
+                <div class="signal-provenance" id="signal-provenance">Signals load on selection. The browser receives the converted source-rate samples; original HDF5 files stay offline.</div>
+                <div class="signal-filter-controls">
+                  <label><span>Signal filter</span><select id="signal-filter-type"><option value="none">Unfiltered source</option><option value="lowpass">Low-pass · 4th-order Butterworth</option><option value="highpass">High-pass · 4th-order Butterworth</option><option value="bandpass">Band-pass · 4th-order Butterworth sections</option></select></label>
+                  <label id="filter-low-control" class="hidden"><span>Low cutoff (Hz)</span><input id="signal-filter-low" type="number" min="0.1" step="0.1" value="3"></label>
+                  <label id="filter-high-control" class="hidden"><span>High cutoff (Hz)</span><input id="signal-filter-high" type="number" min="0.2" step="0.1" value="12"></label>
+                  <label class="filter-overlay-control"><input id="signal-source-psd" type="checkbox" disabled><span>Overlay stored source PSD (0–20 Hz)</span></label>
+                  <span id="signal-filter-status" class="filter-status">Unfiltered source signal</span>
+                </div>
                 <div class="signal-grid">
                   <div class="signal-plot-panel"><div class="plot-title">ACCELEROMETER <span>m/s²</span></div><canvas id="acc-canvas" height="210" aria-label="Accelerometer time series"></canvas><div class="axis-caption">Time (s)</div></div>
                   <div class="signal-plot-panel"><div class="plot-title">GYROSCOPE <span>deg/s</span></div><canvas id="gyr-canvas" height="210" aria-label="Gyroscope time series"></canvas><div class="axis-caption">Time (s)</div></div>
                 </div>
                 <div id="signal-empty" class="signal-empty">Choose an event to load its signal. Ambiguous links require you to choose a source record.</div>
                 <div class="psd-section">
-                  <div class="psd-heading"><div><div class="eyebrow">FREQUENCY DOMAIN</div><h3>Precomputed Welch spectrum</h3></div><span class="band-note"><i></i>Source sampled at 100 Hz</span></div>
+                  <div class="psd-heading"><div><div class="eyebrow">FREQUENCY DOMAIN</div><h3>Welch PSD · selected signal</h3></div><span class="band-note"><i></i><span id="psd-rate-note">Source sampled at 100 Hz</span></span></div>
                   <div class="psd-grid">
-                    <div><div class="plot-title">ACCELEROMETER <span>log10 PSD · (m/s²)²/Hz</span></div><canvas id="acc-psd-canvas" height="180" aria-label="Accelerometer precomputed Welch power spectrum"></canvas><div class="plot-title">INTEGRATED BAND POWER <span>log10 (m/s²)²</span></div><canvas id="acc-band-canvas" height="122" aria-label="Accelerometer integrated band powers as vertical bars"></canvas></div>
-                    <div><div class="plot-title">GYROSCOPE <span>log10 PSD · (deg/s)²/Hz</span></div><canvas id="gyr-psd-canvas" height="180" aria-label="Gyroscope precomputed Welch power spectrum"></canvas><div class="plot-title">INTEGRATED BAND POWER <span>log10 (deg/s)²</span></div><canvas id="gyr-band-canvas" height="122" aria-label="Gyroscope integrated band powers as vertical bars"></canvas></div>
+                    <div><div class="plot-title">ACCELEROMETER <span>log10 PSD · (m/s²)²/Hz</span></div><canvas id="acc-psd-canvas" height="180" aria-label="Accelerometer Welch power spectrum for the selected signal processing"></canvas><div class="plot-title">ORIGINAL-SOURCE BAND POWER <span>log10 (m/s²)²</span></div><canvas id="acc-band-canvas" height="122" aria-label="Original-source accelerometer integrated band powers"></canvas></div>
+                    <div><div class="plot-title">GYROSCOPE <span>log10 PSD · (deg/s)²/Hz</span></div><canvas id="gyr-psd-canvas" height="180" aria-label="Gyroscope Welch power spectrum for the selected signal processing"></canvas><div class="plot-title">ORIGINAL-SOURCE BAND POWER <span>log10 (deg/s)²</span></div><canvas id="gyr-band-canvas" height="122" aria-label="Original-source gyroscope integrated band powers"></canvas></div>
                   </div>
-                  <div class="axis-caption">Precomputed Welch PSD from 0–20 Hz, plus integrated 3–7, 7–10, 10–12, and 3–12 Hz band powers (10–12 Hz comes from the 100 Hz source, not the 20 Hz preview).</div>
+                  <div class="axis-caption">PSD frequency axis is Hz. PSD is recalculated from the selected signal and filter. Original-source band powers remain precomputed (3–7, 7–10, 10–12, and 3–12 Hz); signal plots use a per-pixel min/max envelope when needed, while filters and PSD use every 100 Hz sample.</div>
                 </div>
               </section>
               </div>
@@ -254,20 +271,63 @@
               </div>
               <section id="seed-overview-panel" class="card seed-overview">
                 <div class="section-heading"><div><div class="eyebrow">ALL TRAINING SEEDS</div><h2>Stored performance summary</h2></div></div>
+                <h3 class="seed-summary-heading">Cross-seed average ± SD</h3>
+                <div class="table-scroll"><table><thead><tr><th>SPLIT</th><th>BA · MEAN ± SD</th><th>RECALL · MEAN ± SD</th><th>SPECIFICITY · MEAN ± SD</th><th>EVENTS · MEAN ± SD</th></tr></thead><tbody id="seed-overview-summary"></tbody></table></div>
+                <p class="chart-footnote">Mean ± sample standard deviation across seeds with an available metric. OOF event counts include consensus events only; holdout counts use the stored evaluation N.</p>
+                <h3 class="seed-summary-heading">Metrics by seed</h3>
                 <div class="table-scroll"><table><thead><tr><th>SEED</th><th>OOF BA</th><th>OOF RECALL</th><th>OOF SPECIFICITY</th><th>OOF N</th><th>TEST BA</th><th>TEST RECALL</th><th>TEST SPECIFICITY</th><th>TEST N</th></tr></thead><tbody id="seed-overview-rows"></tbody></table></div>
-                <p class="chart-footnote">Select a seed tab to inspect its stored OOF events or final-test aggregates. Thresholds and results are read from the run JSON.</p>
+                <p class="chart-footnote">Select a seed tab to inspect its stored OOF events and, when included in the run, patient-level final-test predictions. Thresholds and results are read from the run JSON.</p>
               </section>
               <div class="kpi-grid hidden" id="seed-kpis"></div>
               <section id="oof-detail" class="card chart-card">
                 <div class="section-heading"><div><div class="eyebrow">OUT-OF-FOLD · SELECTED SEED</div><h2>OOF event probabilities</h2></div><span class="threshold-chip compact" id="oof-threshold">Threshold —</span></div>
-                <div class="data-limitation"><b>Metrics use consensus events only (A1 = A2).</b> The plot and table retain A1/A2 disagreements as separate inspection rows; they do not enter consensus metrics. Event identity is unavailable, so points use source array order only and cannot be linked to a patient, action, waveform, or HDF5 row.</div>
+                <div class="data-limitation"><b>Metrics use consensus events only (A1 = A2).</b> The plot and table retain A1/A2 disagreements as separate inspection rows; they do not enter consensus metrics. <span id="oof-identity-note"></span></div>
+                <div id="seed-oof-view-tabs" class="global-tabs seed-oof-view-tabs hidden" role="tablist" aria-label="Seed OOF view">
+                  <button class="global-tab active" type="button" role="tab" aria-selected="true" data-seed-oof-view="events">Events</button>
+                  <button class="global-tab" id="seed-patient-tab" type="button" role="tab" aria-selected="false" data-seed-oof-view="patients">Patients</button>
+                </div>
+                <div id="seed-oof-events">
                 <div class="probability-wrap" id="oof-plot"></div>
-                <div class="table-scroll seed-event-scroll"><table><thead><tr><th>ARRAY INDEX</th><th>A1 / A2</th><th>SOFT TARGET</th><th>PROBABILITY</th><th>THRESHOLD</th><th>MODEL</th><th>STATUS</th></tr></thead><tbody id="oof-rows"></tbody></table></div>
+                <div class="table-scroll seed-event-scroll"><table><thead><tr><th>ARRAY INDEX</th><th>PATIENT</th><th>ACTION</th><th>SOURCE ROW</th><th>A1 / A2</th><th>SOFT TARGET</th><th>PROBABILITY</th><th>THRESHOLD</th><th>MODEL</th><th>STATUS</th></tr></thead><tbody id="oof-rows"></tbody></table></div>
+                </div>
+                <div id="seed-oof-patients" class="hidden">
+                  <section class="card seed-patient-cohort">
+                    <div class="section-heading"><div><div class="eyebrow">PATIENT LEVEL · SELECTED SEED OOF</div><h2>Patient summaries</h2></div><span class="stratified-threshold" id="seed-patient-count"></span></div>
+                    <div class="table-scroll"><table><thead><tr><th>RANK</th><th>PATIENT</th><th>CONSENSUS / EVENTS</th><th>NEG/POS</th><th>SPECIFICITY</th><th>RECALL</th><th>DIAGNOSIS</th><th>AGE RANGE</th></tr></thead><tbody id="seed-patient-rows"></tbody></table></div>
+                    <p class="chart-footnote">Ranked by consensus error rate from stored OOF predictions. Disagreements remain visible but are excluded from metrics. This is patient-grouped seed OOF analysis, not LOSO.</p>
+                  </section>
+                  <section class="card seed-patient-detail">
+                    <div class="section-heading"><div><div class="eyebrow">SELECTED PATIENT</div><h2 id="seed-patient-title">Choose a patient</h2></div><span class="stratified-threshold" id="seed-patient-summary"></span></div>
+                    <div class="table-scroll"><table><thead><tr><th>ARRAY INDEX</th><th>ACTION</th><th>SOURCE ROW</th><th>FILENAME</th><th>A1 / A2</th><th>PROBABILITY</th><th>STATUS</th></tr></thead><tbody id="seed-patient-event-rows"><tr><td colspan="7" class="empty-cell">Select a patient to inspect its OOF events.</td></tr></tbody></table></div>
+                  </section>
+                </div>
               </section>
               <section id="test-detail" class="card test-summary hidden">
                 <div class="section-heading"><div><div class="eyebrow">FINAL TEST · SELECTED SEED</div><h2>Aggregate test result</h2></div><span class="threshold-chip compact" id="test-threshold">Threshold —</span></div>
-                <div class="data-limitation"><b>Only aggregate final-test results were saved.</b> Event-level probabilities and identifiers are absent from the run artifacts.</div>
-                <div class="test-content"><div class="test-metrics" id="test-metrics"></div><div class="confusion-wrap" id="confusion-matrix"></div></div>
+                <div class="data-limitation"><b>Metrics use consensus events only (A1 = A2).</b> <span id="test-identity-note"></span></div>
+                <div id="seed-test-view-tabs" class="global-tabs seed-oof-view-tabs hidden" role="tablist" aria-label="Seed final-test view">
+                  <button class="global-tab active" type="button" role="tab" aria-selected="true" data-seed-test-view="summary">Summary</button>
+                  <button class="global-tab" type="button" role="tab" aria-selected="false" data-seed-test-view="patients">Patients</button>
+                </div>
+                <div id="test-aggregate-panel" class="test-content"><div class="test-metrics" id="test-metrics"></div><div class="confusion-wrap" id="confusion-matrix"></div></div>
+                <div id="test-patient-panel" class="hidden">
+                  <p id="holdout-patient-load-status" class="chart-footnote hidden"></p>
+                  <div id="holdout-patient-cohort">
+                  <section class="card seed-patient-cohort">
+                    <div class="section-heading"><div><div class="eyebrow">PATIENT LEVEL · SELECTED SEED HOLDOUT</div><h2>Patient summaries</h2></div><span class="stratified-threshold" id="test-patient-count"></span></div>
+                    <div class="table-scroll"><table><thead><tr><th aria-sort="none"><button class="seed-holdout-sort-button" type="button" data-holdout-sort="rank">RANK</button></th><th aria-sort="none"><button class="seed-holdout-sort-button" type="button" data-holdout-sort="patient">PATIENT</button></th><th aria-sort="none"><button class="seed-holdout-sort-button" type="button" data-holdout-sort="consensus">CONSENSUS / EVENTS</button></th><th aria-sort="none"><button class="seed-holdout-sort-button" type="button" data-holdout-sort="class-count">NEG/POS</button></th><th aria-sort="none"><button class="seed-holdout-sort-button" type="button" data-holdout-sort="specificity">SPECIFICITY</button></th><th aria-sort="none"><button class="seed-holdout-sort-button" type="button" data-holdout-sort="recall">RECALL</button></th><th aria-sort="none"><button class="seed-holdout-sort-button" type="button" data-holdout-sort="diagnosis">DIAGNOSIS</button></th><th aria-sort="none"><button class="seed-holdout-sort-button" type="button" data-holdout-sort="age">AGE RANGE</button></th></tr></thead><tbody id="test-patient-rows"></tbody></table></div>
+                    <p class="chart-footnote">Ranked by consensus error rate from stored final-test predictions. Disagreements stay visible but are excluded from metrics. Uses the stored threshold; this is held-out seed analysis, not LOSO.</p>
+                  </section>
+                  <section class="card seed-patient-detail">
+                    <div class="section-heading"><div><div class="eyebrow">SELECTED PATIENT</div><h2 id="test-patient-title">Choose a patient</h2></div><span class="stratified-threshold" id="test-patient-summary"></span></div>
+                    <div class="table-scroll"><table><thead><tr><th>ARRAY INDEX</th><th>ACTION</th><th>STORED ROW ID</th><th>FILENAME</th><th>A1 / A2</th><th>PROBABILITY</th><th>STATUS</th></tr></thead><tbody id="test-patient-event-rows"><tr><td colspan="7" class="empty-cell">Select a patient to inspect its holdout events.</td></tr></tbody></table></div>
+                  </section>
+                  </div>
+                  <section id="holdout-patient-inspection" class="hidden">
+                    <div class="section-heading"><div><div class="eyebrow">FINAL-TEST PATIENT INSPECTION</div><h2>Stored holdout analysis</h2></div><button id="holdout-back-button" class="button secondary" type="button">Back to patients</button></div>
+                    <div id="seed-subject-mount"></div>
+                  </section>
+                </div>
               </section>
             </section>
 

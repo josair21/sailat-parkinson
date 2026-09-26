@@ -65,10 +65,12 @@ Build and deploy a clean, static, browser-side LOSO inspection dashboard at `par
 
 ## Current status
 
-- Phase 1 inventory has begun using the read-only `liveserver` source. The selected `6ch_pretrain_weak` example has five per-seed OOF/test metric folders and a `loso_seed42` global prediction folder. The source HDF5 is 88.6 MB.
+- The local corrected source HDF5 is 232.8 MB with 2,933 six-channel rows, including 1,325 transition segments and per-row timing/context fields.
 - Offline conversion is split into a one-time shared dataset package and small per-run result packages. New runs reference the same content-derived `dataset_id`; see `CONVERSION.md`.
-- The shared dataset converter emits filtered 20 Hz signal previews, 0–20 Hz Welch spectra, and band-power summaries computed from the 100 Hz source. It preserves every source HDF5 row, action string, and A1/A2 label pair, including transition actions. Schema v3 packages are generated locally under ignored `local-data/v3/`; original-rate waveforms remain offline.
+- The shared dataset converter now emits schema v6 at the user-confirmed 100 Hz, preserving all source rows, source transition context, per-sample elapsed times, and source-only transition plots with no labels/probabilities. The local package, ZIP, and matching LOSO and seed-only JSONs are under ignored `local-data/v6/`.
 - A static local UI now covers Global LOSO, per-seed OOF, and final-test aggregate metrics. The static server listens on loopback at port 8765.
 - Global LOSO now includes run-wide per-action and filename-side metrics from a precomputed summary. Only binary consensus events contribute to performance metrics; disagreement and side-assignment coverage are reported separately. Actions without event predictions in this LOSO artifact cannot receive prediction metrics.
-- OOF per-event identities and final-test per-event predictions are not present in the current artifacts. Full patient/event-level OOF/test inspection requires future training exports with identifiers and predictions.
+- Older seed OOF artifacts do not contain event identity, but the newer WindowNet seed-only export includes patient/action/filename/source-row fields for OOF and holdout events. The browser groups those stored predictions by patient and reports consensus-only metrics; selected holdout patients open patient metadata, event views, and signals matched by patient/action/labels/filename. Multiple signal candidates remain ambiguous for researcher selection, and unmatched events have no signal. This is seed analysis, not LOSO. Other identity-free or aggregate-only exports retain their source limitations.
+- Seed-only runs open to Seed Results and hide Global LOSO navigation when no LOSO patients are present.
+- The local upload accepts multiple converted run JSON files for one dataset, exposes them through the existing run selector, and caches the full selection in IndexedDB.
 - Before running conversion, review HDF5 event-match ambiguity. Before uploading, establish the Cloudflare Access path for both app and data, authorization, and retention policy.
