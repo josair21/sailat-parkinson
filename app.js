@@ -78,8 +78,9 @@ function applyTheme(preference) {
     drawTimeSeries($("#acc-canvas"), channels, rate, 0, "m/s²", state.signalElapsedTime);
     drawTimeSeries($("#gyr-canvas"), channels, rate, 3, "deg/s", state.signalElapsedTime);
     const reference=$("#signal-source-psd")?.checked?state.signalOriginalSpectrum:null;
-    drawPSD($("#acc-psd-canvas"), state.signalSpectrum, 0, reference);
-    drawPSD($("#gyr-psd-canvas"), state.signalSpectrum, 3, reference);
+    const psdRange=selectedPsdRange(state.signalSpectrum);
+    drawPSD($("#acc-psd-canvas"), state.signalSpectrum, 0, reference, psdRange);
+    drawPSD($("#gyr-psd-canvas"), state.signalSpectrum, 3, reference, psdRange);
     drawBandPowerBars($("#acc-band-canvas"), state.signalFrequencySummary, 0);
     drawBandPowerBars($("#gyr-band-canvas"), state.signalFrequencySummary, 3);
   }
@@ -444,8 +445,8 @@ function renderStratifiedSummary() {
   $("#stratified-threshold").textContent = summary ? `Stored threshold ${fmt(summary.threshold, 3)}` : "Summary unavailable";
   const coverage = summary?.side_coverage;
   $("#dominance-results-note").textContent = summary
-    ? `Action results include only actions with event predictions in this run; source actions without predictions cannot have model metrics here. Filename convention: .00 = Non-dominant; .01 = Dominant. Events count only when candidate filenames agree on side. ${coverage.assigned_events} assigned; ${coverage.no_candidate_events} without candidates; ${coverage.uncertain_candidate_side_events} with mixed or unrecognized candidate sides. Ambiguous signal identity may still remain.`
-    : "Action results require stored event predictions. Dominance groups require recognized, consistent source filename suffixes; unknown and mixed candidate sides are excluded.";
+    ? `Action results include only actions with event predictions in this run; source actions without predictions cannot have model metrics here. Filename convention: .00 = Non-dominant; .01 = Dominant. Raw LOSO filenames are used when available; otherwise matched candidate filenames must agree on side. ${coverage.assigned_events} assigned; ${coverage.no_candidate_events} without candidates; ${coverage.uncertain_candidate_side_events} with mixed or unrecognized candidate sides. Ambiguous signal identity may still remain.`
+    : "Action results require stored event predictions. Dominance groups use raw LOSO filenames when available; otherwise recognized, consistent source filename suffixes are required.";
 }
 
 function populatePatients() {
@@ -1471,8 +1472,9 @@ function applySignalFilter() {
     drawTimeSeries($("#acc-canvas"),channels,sampleRate,0,"m/s²", state.signalElapsedTime);
     drawTimeSeries($("#gyr-canvas"),channels,sampleRate,3,"deg/s",state.signalElapsedTime);
     const reference=$("#signal-source-psd").checked?state.signalOriginalSpectrum:null;
-    drawPSD($("#acc-psd-canvas"),state.signalSpectrum,0,reference);
-    drawPSD($("#gyr-psd-canvas"),state.signalSpectrum,3,reference);
+    const psdRange=selectedPsdRange(state.signalSpectrum);
+    drawPSD($("#acc-psd-canvas"),state.signalSpectrum,0,reference,psdRange);
+    drawPSD($("#gyr-psd-canvas"),state.signalSpectrum,3,reference,psdRange);
     const name=type==="none"?"Unfiltered source signal":type==="bandpass"?`Zero-phase 4th-order Butterworth high-pass ${lowHz} Hz + low-pass ${highHz} Hz`:`Zero-phase 4th-order Butterworth ${type} ${type==="lowpass"?highHz:lowHz} Hz`;
     $("#signal-filter-status").textContent=`${name} · ${fmt(sampleRate,1)} Hz · Welch PSD recalculated`;
   }catch(error){$("#signal-filter-status").textContent=`Filter could not be applied: ${error.message||error}`;}
@@ -1495,24 +1497,48 @@ function drawTimeSeries(canvas, channels, sampleRate, offset, unit, elapsedTimes
   const {ctx,width,height} = setupCanvas(canvas, 210);
   const left = 45, right = 10, top = 13, bottom = 23, plotW = width-left-right, plotH = height-top-bottom;
   const arrays = channels.slice(offset, offset+3);
+  const hasElapsed=elapsedTimes?.length===channels[0].length&&elapsedTimes.length>0&&Number.isFinite(elapsedTimes[0])&&Number.isFinite(elapsedTimes[elapsedTimes.length-1]);
+  const timeStart=hasElapsed?elapsedTimes[0]:0,timeEnd=hasElapsed?elapsedTimes[elapsedTimes.length-1]:channels[0].length/sampleRate;
+  const windowStats=[];
   let min = Infinity, max = -Infinity;
-  arrays.forEach((arr) => arr.forEach((value) => { if (Number.isFinite(value)) { min=Math.min(min,value);max=Math.max(max,value); } }));
+  arrays.forEach((arr,axis) => {
+    arr.forEach((value,index) => {
+      if(!Number.isFinite(value))return;
+      min=Math.min(min,value);max=Math.max(max,value);
+      const elapsed=hasElapsed?elapsedTimes[index]-timeStart:index/sampleRate;
+      const windowIndex=Math.max(0,Math.floor(elapsed/4));
+      windowStats[windowIndex]||=arrays.map(()=>({min:Infinity,max:-Infinity}));
+      const stats=windowStats[windowIndex][axis];
+      stats.min=Math.min(stats.min,value);stats.max=Math.max(stats.max,value);
+    });
+  });
   if (!Number.isFinite(min) || !Number.isFinite(max)) return;
   if (max === min) {max += 1;min -= 1;}
   const pad = (max-min)*.08; min-=pad; max+=pad;
+  const median=(values)=>{const sorted=[...values].sort((a,b)=>a-b),middle=Math.floor(sorted.length/2);return sorted.length%2?sorted[middle]:(sorted[middle-1]+sorted[middle])/2;};
+  // First take the median across axes within each 4-second window, then across windows.
+  const windowMedians=windowStats.map((stats)=>({
+    max:median(stats.map((axis)=>axis.max).filter(Number.isFinite)),
+    min:median(stats.map((axis)=>axis.min).filter(Number.isFinite)),
+  })).filter((window)=>Number.isFinite(window.max)&&Number.isFinite(window.min));
+  const referenceLines=[
+    {name:"Median max",value:median(windowMedians.map((window)=>window.max)),color:isDarkTheme()?"#e3a35e":"#b96c1f",dash:[5,3]},
+    {name:"Median min",value:median(windowMedians.map((window)=>window.min)),color:isDarkTheme()?"#b49bd8":"#7556a5",dash:[2,3]},
+  ].map((line)=>({...line,y:top+(max-line.value)/(max-min)*plotH}));
   ctx.clearRect(0,0,width,height);
   ctx.font="9px monospace";ctx.fillStyle=isDarkTheme()?"#a9b7c2":"#8d99a2";ctx.strokeStyle=isDarkTheme()?"#33424f":"#edf0f2";ctx.lineWidth=1;
   for(let tick=0;tick<=4;tick++){
     const y=top+tick*plotH/4;ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(width-right,y);ctx.stroke();
-    const value=max-(tick/4)*(max-min);ctx.textAlign="right";ctx.fillText(value.toPrecision(3),left-6,y+3);
+    const value=max-(tick/4)*(max-min);ctx.textAlign="right";
+    if(!referenceLines.some((line)=>Math.abs(line.y-y)<9))ctx.fillText(value.toPrecision(3),left-6,y+3);
   }
-  const hasElapsed=elapsedTimes?.length===channels[0].length&&elapsedTimes.length>0&&Number.isFinite(elapsedTimes[0])&&Number.isFinite(elapsedTimes[elapsedTimes.length-1]);
-  const timeStart=hasElapsed?elapsedTimes[0]:0,timeEnd=hasElapsed?elapsedTimes[elapsedTimes.length-1]:channels[0].length/sampleRate;
   const timeSpan=Math.max(Number.EPSILON,timeEnd-timeStart);
   for(let tick=0;tick<=4;tick++){
     const x=left+tick*plotW/4;ctx.beginPath();ctx.moveTo(x,top);ctx.lineTo(x,height-bottom);ctx.stroke();
     ctx.textAlign="center";ctx.fillText((timeStart+timeSpan*tick/4).toFixed(1),x,height-5);
   }
+  referenceLines.forEach((line)=>{ctx.beginPath();ctx.strokeStyle=line.color;ctx.lineWidth=1.2;ctx.setLineDash(line.dash);ctx.moveTo(left,line.y);ctx.lineTo(width-right,line.y);ctx.stroke();});
+  ctx.setLineDash([]);
   arrays.forEach((arr,axis)=>{
     ctx.beginPath();ctx.strokeStyle=AXIS_COLORS[axis];ctx.lineWidth=1.05;
     if(arr.length<=plotW*2){
@@ -1527,30 +1553,57 @@ function drawTimeSeries(canvas, channels, sampleRate, offset, unit, elapsedTimes
     }
     ctx.stroke();
   });
+  ctx.textAlign="right";
+  referenceLines.forEach((line)=>{
+    const overlapsReference=referenceLines.some((other)=>other!==line&&Math.abs(other.y-line.y)<11);
+    const labelY=line.y+(overlapsReference?(line.name==="Median max"?-6:9):3);
+    ctx.beginPath();ctx.strokeStyle=line.color;ctx.lineWidth=1.4;ctx.moveTo(left-4,line.y);ctx.lineTo(left-1,labelY-2);ctx.stroke();
+    ctx.fillStyle=line.color;ctx.font="bold 9px monospace";ctx.fillText(line.value.toPrecision(3),left-6,labelY);
+  });
   ctx.textAlign="left";arrays.forEach((_,axis)=>{ctx.fillStyle=AXIS_COLORS[axis];ctx.fillText(["X","Y","Z"][axis],left+axis*23,10);});
   ctx.textAlign="right";ctx.fillStyle=isDarkTheme()?"#a9b7c2":"#89969f";ctx.fillText(unit,width-right,10);
 }
 
-function drawPSD(canvas, spectrum, channelOffset, referenceSpectrum=null) {
+function selectedPsdRange(spectrum) {
+  if($("#signal-filter-type")?.value!=="bandpass"||!spectrum?.frequency?.length)return null;
+  const lowHz=Number($("#signal-filter-low")?.value),highHz=Number($("#signal-filter-high")?.value);
+  const availableMax=Math.min(50,spectrum.frequency[spectrum.frequency.length-1]);
+  if(!Number.isFinite(lowHz)||!Number.isFinite(highHz)||lowHz<0||highHz<=lowHz||lowHz>=availableMax)return null;
+  return {minHz:Math.max(0,lowHz-1),maxHz:Math.min(availableMax,highHz+1)};
+}
+
+function drawPSD(canvas, spectrum, channelOffset, referenceSpectrum=null, viewRange=null) {
   const {ctx,width,height}=setupCanvas(canvas,180),left=45,right=10,top=14,bottom=24,plotW=width-left-right,plotH=height-top-bottom;
   ctx.clearRect(0,0,width,height);
   const axes=spectrum?.channels?.slice(channelOffset,channelOffset+3),frequency=spectrum?.frequency;
   if(!axes||!frequency?.length)return;
-  const maxHz=Math.min(50,frequency[frequency.length-1]);
+  const availableMax=Math.min(50,frequency[frequency.length-1]);
+  let minHz=viewRange?Math.max(0,viewRange.minHz):0,maxHz=viewRange?Math.min(availableMax,viewRange.maxHz):availableMax;
+  if(!(maxHz>minHz))return;
   let minLog=Infinity,maxLog=-Infinity;
-  axes.forEach((values)=>values.forEach((power,index)=>{if(frequency[index]<=maxHz&&power>0){const value=Math.log10(power);minLog=Math.min(minLog,value);maxLog=Math.max(maxLog,value);}}));
-  if(referenceSpectrum)referenceSpectrum.channels.slice(channelOffset,channelOffset+3).forEach((values)=>values.forEach((power,index)=>{if(referenceSpectrum.frequency[index]<=maxHz&&power>0){const value=Math.log10(power);minLog=Math.min(minLog,value);maxLog=Math.max(maxLog,value);}}));
+  const collectPowerRange=()=>{
+    minLog=Infinity;maxLog=-Infinity;
+    axes.forEach((values)=>values.forEach((power,index)=>{if(frequency[index]>=minHz&&frequency[index]<=maxHz&&power>0){const value=Math.log10(power);minLog=Math.min(minLog,value);maxLog=Math.max(maxLog,value);}}));
+    if(referenceSpectrum)referenceSpectrum.channels.slice(channelOffset,channelOffset+3).forEach((values)=>values.forEach((power,index)=>{if(referenceSpectrum.frequency[index]>=minHz&&referenceSpectrum.frequency[index]<=maxHz&&power>0){const value=Math.log10(power);minLog=Math.min(minLog,value);maxLog=Math.max(maxLog,value);}}));
+  };
+  collectPowerRange();
+  if((!Number.isFinite(minLog)||!Number.isFinite(maxLog))&&viewRange){minHz=0;maxHz=availableMax;collectPowerRange();}
   if(!Number.isFinite(minLog)||!Number.isFinite(maxLog))return;
   if(maxLog-minLog<1){maxLog+=.5;minLog-=.5;}
-  const y=(value)=>top+(maxLog-value)/(maxLog-minLog)*plotH,x=(hz)=>left+hz/maxHz*plotW;
-  ctx.fillStyle=isDarkTheme()?"#203b3a":"#edf6f3";ctx.fillRect(x(3),top,x(Math.min(12,maxHz))-x(3),plotH);
+  const y=(value)=>top+(maxLog-value)/(maxLog-minLog)*plotH,x=(hz)=>left+(hz-minHz)/(maxHz-minHz)*plotW;
+  const shadeLow=Math.max(3,minHz),shadeHigh=Math.min(12,maxHz);
+  if(shadeHigh>shadeLow){ctx.fillStyle=isDarkTheme()?"#203b3a":"#edf6f3";ctx.fillRect(x(shadeLow),top,x(shadeHigh)-x(shadeLow),plotH);}
   ctx.font="9px monospace";ctx.textAlign="right";ctx.fillStyle=isDarkTheme()?"#a9b7c2":"#8d99a2";ctx.strokeStyle=isDarkTheme()?"#33424f":"#edf0f2";
   for(let tick=0;tick<=4;tick++){const yy=top+tick*plotH/4;ctx.beginPath();ctx.moveTo(left,yy);ctx.lineTo(width-right,yy);ctx.stroke();ctx.fillText((maxLog-tick*(maxLog-minLog)/4).toFixed(1),left-6,yy+3);}
-  for(let hz=0;hz<=maxHz;hz+=5){const xx=x(hz);ctx.beginPath();ctx.moveTo(xx,top);ctx.lineTo(xx,height-bottom);ctx.stroke();ctx.textAlign="center";ctx.fillText(String(hz),xx,height-5);}
-  axes.forEach((values,axis)=>{ctx.beginPath();ctx.strokeStyle=AXIS_COLORS[axis];ctx.lineWidth=1.1;let started=false;for(let i=0;i<values.length;i++){if(frequency[i]>maxHz)break;const power=values[i];if(!(power>0))continue;const xx=x(frequency[i]),yy=y(Math.log10(power));if(!started){ctx.moveTo(xx,yy);started=true;}else ctx.lineTo(xx,yy);}ctx.stroke();});
+  const span=maxHz-minHz,tickStep=span<=1?.2:span<=4?1:span<=10?2:span<=20?5:10;
+  const frequencyTicks=[minHz];
+  for(let hz=(Math.floor(minHz/tickStep)+1)*tickStep;hz<maxHz-1e-8;hz+=tickStep)frequencyTicks.push(hz);
+  if(maxHz-minHz>tickStep*.35)frequencyTicks.push(maxHz);
+  frequencyTicks.forEach((hz)=>{const xx=x(hz);ctx.beginPath();ctx.moveTo(xx,top);ctx.lineTo(xx,height-bottom);ctx.stroke();ctx.textAlign="center";ctx.fillText(hz.toFixed(tickStep<1?2:0),xx,height-5);});
+  axes.forEach((values,axis)=>{ctx.beginPath();ctx.strokeStyle=AXIS_COLORS[axis];ctx.lineWidth=1.1;let started=false;for(let i=0;i<values.length;i++){if(frequency[i]>maxHz)break;if(frequency[i]<minHz)continue;const power=values[i];if(!(power>0))continue;const xx=x(frequency[i]),yy=y(Math.log10(power));if(!started){ctx.moveTo(xx,yy);started=true;}else ctx.lineTo(xx,yy);}ctx.stroke();});
   if(referenceSpectrum){
     const referenceAxes=referenceSpectrum.channels.slice(channelOffset,channelOffset+3),referenceFrequency=referenceSpectrum.frequency;
-    referenceAxes.forEach((values,axis)=>{ctx.beginPath();ctx.strokeStyle=AXIS_COLORS[axis];ctx.lineWidth=1;ctx.setLineDash([3,3]);let started=false;for(let i=0;i<values.length;i++){if(referenceFrequency[i]>maxHz)break;const power=values[i];if(!(power>0))continue;const xx=x(referenceFrequency[i]),yy=y(Math.log10(power));if(!started){ctx.moveTo(xx,yy);started=true;}else ctx.lineTo(xx,yy);}ctx.stroke();});
+    referenceAxes.forEach((values,axis)=>{ctx.beginPath();ctx.strokeStyle=AXIS_COLORS[axis];ctx.lineWidth=1;ctx.setLineDash([3,3]);let started=false;for(let i=0;i<values.length;i++){if(referenceFrequency[i]>maxHz)break;if(referenceFrequency[i]<minHz)continue;const power=values[i];if(!(power>0))continue;const xx=x(referenceFrequency[i]),yy=y(Math.log10(power));if(!started){ctx.moveTo(xx,yy);started=true;}else ctx.lineTo(xx,yy);}ctx.stroke();});
     ctx.setLineDash([]);
   }
   ctx.textAlign="left";axes.forEach((_,axis)=>{ctx.fillStyle=AXIS_COLORS[axis];ctx.fillText(["X","Y","Z"][axis],left+axis*22,10);});
@@ -2009,8 +2062,9 @@ function installHandlers() {
   $("#signal-source-psd").addEventListener("change",()=>{
     if(!state.signalSpectrum)return;
     const reference=$("#signal-source-psd").checked?state.signalOriginalSpectrum:null;
-    drawPSD($("#acc-psd-canvas"),state.signalSpectrum,0,reference);
-    drawPSD($("#gyr-psd-canvas"),state.signalSpectrum,3,reference);
+    const psdRange=selectedPsdRange(state.signalSpectrum);
+    drawPSD($("#acc-psd-canvas"),state.signalSpectrum,0,reference,psdRange);
+    drawPSD($("#gyr-psd-canvas"),state.signalSpectrum,3,reference,psdRange);
   });
   $("#action-filter").addEventListener("change",()=>{renderProbabilityPlot();renderEventTable();});
   $("#event-filter").addEventListener("change",()=>{renderProbabilityPlot();renderEventTable();});

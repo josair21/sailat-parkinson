@@ -12,8 +12,8 @@
     <link rel="apple-touch-icon" sizes="180x180" href="assets/icons/parkinson-viewer-180.png">
     <link rel="manifest" href="site.webmanifest">
     <script>document.documentElement.dataset.theme=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"</script>
-    <link rel="stylesheet" href="styles.css?v=13">
-    <script src="app.js?v=13" defer></script>
+    <link rel="stylesheet" href="styles.css?v=15">
+    <script src="app.js?v=16" defer></script>
   </head>
   <body>
     <div class="app-frame">
@@ -223,8 +223,8 @@
                   <span id="signal-filter-status" class="filter-status">Unfiltered source signal</span>
                 </div>
                 <div class="signal-grid">
-                  <div class="signal-plot-panel"><div class="plot-title">ACCELEROMETER <span>m/s²</span></div><canvas id="acc-canvas" height="210" aria-label="Accelerometer time series"></canvas><div class="axis-caption">Time (s)</div></div>
-                  <div class="signal-plot-panel"><div class="plot-title">GYROSCOPE <span>deg/s</span></div><canvas id="gyr-canvas" height="210" aria-label="Gyroscope time series"></canvas><div class="axis-caption">Time (s)</div></div>
+                  <div class="signal-plot-panel"><div class="plot-title">ACCELEROMETER <span>m/s²</span></div><canvas id="acc-canvas" height="210" aria-label="Accelerometer time series with median axis maxima and minima summarized in 4-second windows"></canvas><div class="axis-caption">Time (s) · 4 s window medians: max (orange), min (purple)</div></div>
+                  <div class="signal-plot-panel"><div class="plot-title">GYROSCOPE <span>deg/s</span></div><canvas id="gyr-canvas" height="210" aria-label="Gyroscope time series with median axis maxima and minima summarized in 4-second windows"></canvas><div class="axis-caption">Time (s) · 4 s window medians: max (orange), min (purple)</div></div>
                 </div>
                 <div id="signal-empty" class="signal-empty">Choose an event to load its signal. Ambiguous links require you to choose a source record.</div>
                 <div class="psd-section">

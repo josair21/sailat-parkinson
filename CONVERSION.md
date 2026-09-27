@@ -96,8 +96,8 @@ These are prediction-result groups, so they include only actions present in the 
 
 ## Available result detail and limits
 
-- The global LOSO `predictions.npz` files contain patient, action, labels, probability, and duration, so they can be joined to shared patient metadata and matched to shared signals.
-- Matching uses exact patient/action/A1/A2 fields and source duration at the original GW4 rate of 100 Hz. Ties and source rows proposed for multiple events are marked ambiguous with candidate source details. Missing or out-of-tolerance records stay unmatched. The browser signal preserves the source 100 Hz samples.
+- The global LOSO `predictions.npz` files contain patient, action, labels, probability, duration, and filename. The run converter preserves filename identity and links by patient/action/filename to smartwatch source rows, ignoring only the HDF5-added `_segmentNNNN` token. This allows moment and laterality to be read from the original prediction filename even when its label codes differ from the shared HDF5 metadata.
+- For older LOSO arrays without filenames, matching falls back to patient/action/A1/A2 and source duration at the original GW4 rate of 100 Hz. Ties and source rows proposed for multiple events are marked ambiguous with candidate details; missing or out-of-tolerance records stay unmatched. The browser signal preserves the source 100 Hz samples.
 - Seed OOF files may or may not contain patient/action/source identifiers. The converter preserves them when present and never infers missing identities.
 - Final-test artifacts may contain only aggregate metrics or may also contain event-level holdout predictions. The converter preserves whichever detail is available.
 - Older seed exports lack patient/action/source identifiers; the newer WindowNet example has them for OOF and holdout events, and the converter retains them. The seed dashboard currently focuses on OOF detail and aggregate final-test metrics.

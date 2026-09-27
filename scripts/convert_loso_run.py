@@ -21,7 +21,7 @@ import numpy as np
 import yaml
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 CHANNELS = ["acc_x", "acc_y", "acc_z", "gyr_x", "gyr_y", "gyr_z"]
 UNITS = ["m/s^2", "m/s^2", "m/s^2", "deg/s", "deg/s", "deg/s"]
 REQUIRED_NPZ_KEYS = ("probability", "label", "label_a1", "label_a2", "patient", "action")
@@ -61,10 +61,11 @@ def _stratified_metrics(events: list[dict[str, Any]]) -> dict[str, Any]:
 def _event_filename_side(event: dict[str, Any]) -> str | None:
     candidates = event.get("signal_match", {}).get("candidates", [])
     if not candidates:
-        return None
+        filenames = [event.get("filename")] if event.get("filename") else []
+    else:
+        filenames = [candidate.get("source_filename") or "" for candidate in candidates]
     sides = set()
-    for candidate in candidates:
-        filename = candidate.get("source_filename") or ""
+    for filename in filenames:
         match = re.search(r"\.(00|01)(?=_|$)", filename)
         if not match:
             return None
@@ -95,7 +96,7 @@ def _stratified_summary(events: list[dict[str, Any]], threshold: float) -> dict[
                           "uncertain_candidate_side_events": uncertain_side},
         "notes": ["Performance metrics use only binary consensus events (A1 == A2 and label in {0, 1}); disagreements and nonbinary consensus are counted separately.",
                   "Predictions use the threshold stored in this LOSO run.",
-                  "Filename suffix .00 maps to Non-dominant and .01 maps to Dominant. Events are assigned only when all candidate filenames support the same side."],
+                  "Filename suffix .00 maps to Non-dominant and .01 maps to Dominant. Source filename identity is used when available; otherwise all matched candidate filenames must support the same side."],
     }
 
 
@@ -112,6 +113,18 @@ def _text(value: Any, field: str) -> str:
         except UnicodeDecodeError as exc:
             raise ValueError(f"HDF5 field {field!r} contains non-UTF-8 text") from exc
     return str(value)
+
+
+def _filename_key(value: Any) -> str:
+    """Normalize a source filename across HDF5 segment suffixes and path separators."""
+    name = str(value or "").replace("\\", "/").rsplit("/", 1)[-1]
+    name = re.sub(r"_segment\d+(?=_|$)", "", name, flags=re.IGNORECASE)
+    return name.casefold()
+
+
+def _is_watch4(row: dict[str, Any]) -> bool:
+    device = re.sub(r"[^a-z0-9]", "", str(row.get("device") or "").casefold())
+    return device in {"smartwatch", "galaxywatch4", "gw4"}
 
 
 def _finite(value: Any, label: str) -> float:
@@ -195,7 +208,7 @@ def _read_events(npz_path: Path, expected_patient: str, threshold: float) -> lis
         if missing:
             raise ValueError(f"{npz_path}: missing required prediction arrays: {missing}")
         size = len(data["probability"])
-        optional = ("duration",)
+        optional = ("duration", "filename")
         for key in (*REQUIRED_NPZ_KEYS, *(key for key in optional if key in data.files)):
             if data[key].ndim != 1 or len(data[key]) != size:
                 raise ValueError(f"{npz_path}: array {key!r} is not one-dimensional with length {size}")
@@ -213,6 +226,7 @@ def _read_events(npz_path: Path, expected_patient: str, threshold: float) -> lis
             a1, a2 = int(data["label_a1"][index]), int(data["label_a2"][index])
             soft_target = _finite(data["label"][index], f"{npz_path}: label[{index}]")
             action = _text(data["action"][index], "action")
+            filename = _text(data["filename"][index], "filename") if "filename" in data.files else None
             duration = _finite(data["duration"][index], f"{npz_path}: duration[{index}]") if "duration" in data.files else None
             if duration is not None and duration <= 0:
                 duration = None
@@ -224,6 +238,7 @@ def _read_events(npz_path: Path, expected_patient: str, threshold: float) -> lis
                     "event_id": f"{expected_patient}:{index}",
                     "source_npz_index": index,
                     "action": action,
+                    "filename": filename,
                     "duration_s": duration,
                     "a1": a1,
                     "a2": a2,
@@ -251,12 +266,43 @@ def _match_events(
     tie_tolerance_s: float,
 ) -> dict[str, int]:
     by_attributes: dict[tuple[str, str, int, int], list[dict[str, Any]]] = {}
-    for row in signal_rows:
+    by_filename: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    watch_rows = [row for row in signal_rows if _is_watch4(row)]
+    for row in watch_rows:
         by_attributes.setdefault((row["patient_id"], row["action"], row["a1"], row["a2"]), []).append(row)
+        filename_key = _filename_key(row.get("source_filename"))
+        if filename_key:
+            by_filename.setdefault((row["patient_id"], row["action"], filename_key), []).append(row)
 
     proposals: dict[int, list[dict[str, Any]]] = {}
+    filename_identity_events: set[int] = set()
     stats = {"matched": 0, "ambiguous": 0, "unmatched": 0}
     for event in events:
+        filename_key = _filename_key(event.get("filename"))
+        if filename_key:
+            named_candidates = by_filename.get((patient_id, event["action"], filename_key), [])
+            if named_candidates:
+                filename_identity_events.add(id(event))
+                proposals[id(event)] = named_candidates
+                best_delta = min(
+                    (abs(row["duration_s"] - event["duration_s"]) for row in named_candidates)
+                    if event["duration_s"] is not None else [0.0]
+                )
+                event["signal_match"] = {
+                    "status": "matched" if len(named_candidates) == 1 else "ambiguous",
+                    "reason": "exact_source_filename" if len(named_candidates) == 1 else "duplicate_source_filename_rows",
+                    "closest_duration_difference_s": best_delta if event["duration_s"] is not None else None,
+                    "candidates": [],
+                }
+                continue
+            event["signal_match"] = {
+                "status": "unmatched",
+                "reason": "source_filename_not_found_in_watch4_dataset",
+                "candidates": [],
+            }
+            stats["unmatched"] += 1
+            continue
+
         key = (patient_id, event["action"], event["a1"], event["a2"])
         candidates = by_attributes.get(key, [])
         if not candidates:
@@ -318,11 +364,12 @@ def _match_events(
         if id(event) in collision_events:
             match["status"] = "ambiguous"
             match["reason"] = "hdf5_signal_proposed_for_multiple_prediction_events"
-            proposed = [
-                row for row in by_attributes.get((patient_id, event["action"], event["a1"], event["a2"]), [])
-                if event["duration_s"] is None
-                or abs(row["duration_s"] - event["duration_s"]) <= max_duration_difference_s
-            ]
+            if id(event) not in filename_identity_events:
+                proposed = [
+                    row for row in by_attributes.get((patient_id, event["action"], event["a1"], event["a2"]), [])
+                    if event["duration_s"] is None
+                    or abs(row["duration_s"] - event["duration_s"]) <= max_duration_difference_s
+                ]
         if match["status"] == "ambiguous" and not proposed:
             proposed = by_attributes.get((patient_id, event["action"], event["a1"], event["a2"]), [])
 
@@ -337,6 +384,8 @@ def _match_events(
                     "duration_difference_s": abs(row["duration_s"] - event["duration_s"]) if event["duration_s"] is not None else None,
                     "device": row.get("device"),
                     "source_filename": row.get("source_filename"),
+                    "dataset_a1": row.get("a1"),
+                    "dataset_a2": row.get("a2"),
                     "source_file": row.get("source_file"),
                     "source_segment_index": row.get("source_segment_index"),
                     "epoch": row.get("epoch"),
@@ -690,8 +739,10 @@ def main() -> int:
             "encoding": "row-major interleaved gzip stream; one file per HDF5 source row",
         },
         "matching": {
-            "attributes": ["patient_id", "action", "a1", "a2"],
-            "duration_method": "closest shared dataset sample_count / source rate to prediction duration",
+            "primary_identity": "patient_id, action, and source filename; filename matching ignores HDF5-only _segmentNNNN suffixes",
+            "fallback_attributes": ["patient_id", "action", "a1", "a2"],
+            "fallback_duration_method": "closest shared dataset sample_count / source rate to prediction duration, used only when the raw LOSO prediction has no filename",
+            "source_device": "smartwatch / Galaxy Watch 4 rows only",
             "max_duration_difference_s": args.max_duration_difference_s,
             "tie_tolerance_s": args.tie_tolerance_s,
             "reused_source_signals": "marked ambiguous; never silently attached to multiple prediction events",
@@ -718,6 +769,7 @@ def main() -> int:
                 "No original NPZ/YAML files, model or pretraining weights, scalers, training logs, or source code are included.",
                 "Per-epoch intermediate predictions are omitted; stored seed OOF predictions and best-epoch selection summaries are retained.",
                 "Newer OOF and holdout patient/action/source identifiers are retained when present in the source arrays.",
+                "Global LOSO event filenames are retained and matched to smartwatch source rows when present.",
                 "Events without a valid signal match remain available with an explicit unmatched status; ambiguous candidates remain explicit.",
             ],
         },

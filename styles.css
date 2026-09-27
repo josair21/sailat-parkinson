@@ -239,3 +239,9 @@ button:not(:disabled):focus-visible{outline:2px solid var(--teal);outline-offset
 #test-patient-panel .section-heading{gap:14px}
 #holdout-patient-inspection{margin-top:12px}
 @media(max-width:720px){.seed-patient-cohort,.seed-patient-detail{padding:14px}.seed-patient-cohort .table-scroll,.seed-patient-detail .table-scroll{margin:10px -14px 0;width:calc(100% + 28px)}}
+
+@media(orientation:portrait){.signal-grid,.psd-grid{grid-template-columns:minmax(0,1fr)}}
+
+/* Keep the wide stratified LOSO tables inside the viewport and scroll them locally. */
+#overview-panel,.stratified-card,.stratified-grid,.stratified-grid>div{min-width:0;max-width:100%}
+.stratified-grid .table-scroll{width:100%;max-width:100%;overflow-x:auto;overscroll-behavior-x:contain;-webkit-overflow-scrolling:touch}
